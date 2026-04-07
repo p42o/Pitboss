@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Settings — Pitboss</title>
+  <meta name="theme-color" content="#08080d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Pitboss" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <canvas id="smoke-canvas"></canvas>
+
+  <nav class="nav">
+    <a href="dashboard.html" class="nav-brand">
+      <svg class="spade-icon" viewBox="0 0 100 120" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+        <path d="M50 5 C50 5 5 38 5 65 C5 82 18 94 35 90 C28 100 22 112 22 112 L78 112 C78 112 72 100 65 90 C82 94 95 82 95 65 C95 38 50 5 50 5Z"/>
+      </svg>
+      <span class="brand-text">PITBOSS</span>
+    </a>
+    <div class="nav-links">
+      <a href="dashboard.html" class="nav-link">Dashboard</a>
+      <a href="settings.html" class="nav-link active">Settings</a>
+    </div>
+    <div class="nav-spacer"></div>
+    <div class="nav-stats-group">
+      <div class="nav-stat-item" title="Current time (Central)">
+        <span class="nav-stat-label">CT</span>
+        <span class="nav-stat-value gold" id="stat-time-val">--:-- --</span>
+      </div>
+      <div class="nav-stat-item" title="Bot status">
+        <span class="nav-stat-dot" id="stat-bot-dot"></span>
+        <span class="nav-stat-label">Bot</span>
+        <span class="nav-stat-value" id="stat-bot-val">—</span>
+      </div>
+      <div class="nav-stat-item" title="Members online">
+        <span class="nav-stat-label">Online</span>
+        <span class="nav-stat-value" id="stat-members-val">—</span>
+      </div>
+      <div class="nav-stat-item" title="Queued jobs">
+        <span class="nav-stat-label">Queued</span>
+        <span class="nav-stat-value" id="stat-scheduled-val">—</span>
+      </div>
+    </div>
+    <button class="btn-logout" id="logout-btn">Sign Out</button>
+  </nav>
+
+  <div class="main-content">
+    <div class="settings-layout">
+
+      <!-- LEFT: CONNECTIONS -->
+      <div>
+
+        <!-- Discord Bot -->
+        <div class="panel" id="panel-discord" style="margin-bottom:20px;">
+          <div class="panel-header collapsible" data-panel="panel-discord">
+            <span class="panel-title">🤖 Discord Bot</span>
+            <div class="panel-toggle">
+              <div class="panel-status-badge badge-unknown" id="discord-badge"><span class="badge-dot"></span><span id="discord-badge-text">Unknown</span></div>
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="settings-section">
+              <div class="form-group">
+                <div id="bot-status" class="status-pill status-unknown" style="margin-bottom:10px;">⚪ Unknown</div>
+                <label for="bot-token-input" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Bot Token</label>
+                <div class="input-with-btn">
+                  <input type="password" id="bot-token-input" class="form-control" placeholder="Paste Discord bot token" autocomplete="off" />
+                  <button type="button" class="btn btn-gold" id="bot-token-save-btn">Save &amp; Connect</button>
+                </div>
+                <div id="bot-token-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;min-height:16px;"></div>
+              </div>
+              <div class="form-group" style="margin-top:10px;">
+                <div class="btn-row">
+                  <button type="button" class="btn btn-outline btn-sm" id="fetch-channels-btn">🔄 Refresh Channels</button>
+                  <button type="button" class="btn btn-outline btn-sm" id="bot-ping-btn">🏓 Test / Ping</button>
+                </div>
+                <div id="fetch-channels-status" style="font-size:11px;color:var(--text-dim);margin-top:6px;min-height:16px;"></div>
+              </div>
+
+              <div class="form-group mt-12">
+                <label for="test-channel-sel" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Test Channel</label>
+                <div class="input-with-btn">
+                  <select id="test-channel-sel" class="form-control">
+                    <option value="">-- Select Test Channel --</option>
+                  </select>
+                  <button type="button" class="btn btn-gold" id="save-test-channel-btn">Save</button>
+                </div>
+                <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Used by all 🧪 Test buttons across the dashboard</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- OpenRouter -->
+        <div class="panel" id="panel-openrouter" style="margin-bottom:20px;">
+          <div class="panel-header collapsible" data-panel="panel-openrouter">
+            <span class="panel-title">🧠 OpenRouter</span>
+            <div class="panel-toggle">
+              <div class="panel-status-badge badge-unknown" id="or-badge"><span class="badge-dot"></span><span id="or-badge-text">Unknown</span></div>
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="settings-section">
+              <div class="form-group">
+                <label for="or-key" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">API Key</label>
+                <div class="input-with-btn">
+                  <input type="password" id="or-key" class="form-control" placeholder="sk-or-..." autocomplete="off" />
+                  <button type="button" class="btn btn-gold" id="or-save-btn">Save</button>
+                </div>
+                <div id="or-status" class="status-pill status-unknown" style="margin-top:8px;">⚪ Unknown</div>
+              </div>
+
+              <div class="form-group mt-12">
+                <label for="or-model" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Model</label>
+                <div class="input-with-btn">
+                  <select id="or-model" class="form-control">
+                    <optgroup label="Google Gemini">
+                      <option value="google/gemini-2.0-flash-lite-001">gemini-2.0-flash-lite — fast &amp; cheap ⭐</option>
+                      <option value="google/gemini-2.0-flash-001">gemini-2.0-flash</option>
+                      <option value="google/gemini-2.5-pro-preview-06-05">gemini-2.5-pro-preview</option>
+                      <option value="google/gemini-2.5-flash-preview-05-20">gemini-2.5-flash-preview</option>
+                    </optgroup>
+                    <optgroup label="OpenAI">
+                      <option value="openai/gpt-4.1-nano">gpt-4.1-nano — ultra cheap</option>
+                      <option value="openai/gpt-4.1-mini">gpt-4.1-mini</option>
+                      <option value="openai/gpt-4.1">gpt-4.1</option>
+                      <option value="openai/gpt-4o-mini">gpt-4o-mini</option>
+                      <option value="openai/gpt-4o">gpt-4o</option>
+                    </optgroup>
+                    <optgroup label="Anthropic">
+                      <option value="anthropic/claude-3-5-haiku-20241022">claude-3.5-haiku</option>
+                      <option value="anthropic/claude-3-5-sonnet-20241022">claude-3.5-sonnet</option>
+                      <option value="anthropic/claude-3-7-sonnet-20250219">claude-3.7-sonnet</option>
+                    </optgroup>
+                    <optgroup label="Meta Llama (free tier)">
+                      <option value="meta-llama/llama-3.3-70b-instruct">llama-3.3-70b-instruct</option>
+                      <option value="meta-llama/llama-3.1-8b-instruct">llama-3.1-8b-instruct</option>
+                    </optgroup>
+                    <optgroup label="Mistral">
+                      <option value="mistralai/mistral-small-3.2-24b-instruct">mistral-small-3.2</option>
+                      <option value="mistralai/mistral-large-2411">mistral-large</option>
+                    </optgroup>
+                  </select>
+                  <button type="button" class="btn btn-gold" id="or-model-save-btn">Save</button>
+                </div>
+              </div>
+
+              <div class="form-group mt-12">
+                <button type="button" class="btn btn-outline" id="or-test-btn" style="width:100%;">🔌 Test Connection</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pitboss Personality -->
+        <div class="panel" id="panel-personality" style="margin-bottom:20px;">
+          <div class="panel-header collapsible" data-panel="panel-personality">
+            <span class="panel-title">🎭 Pitboss Personality</span>
+            <div class="panel-toggle">
+              <div class="panel-status-badge badge-unknown" id="personality-badge"><span class="badge-dot"></span><span id="personality-badge-text">Default</span></div>
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+              Pitboss will use this prompt when replying to @mentions in Discord. Edit to customize his personality.
+            </div>
+            <textarea id="personality-prompt" class="compose-area" style="min-height:160px;font-size:12px;"></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:8px;">
+              <button type="button" class="btn btn-outline btn-sm" id="personality-reset-btn" style="margin-right:8px;">Reset to Default</button>
+              <button type="button" class="btn btn-gold btn-sm" id="personality-save-btn">Save Personality</button>
+            </div>
+
+            <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px;">
+              <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:10px;">📋 What Pitboss Can Do</div>
+              <div class="commands-grid">
+                <div class="command-card">
+                  <span class="command-name">@Pitboss [anything]</span>
+                  <span class="command-desc">Tag him and he'll roast/reply in character</span>
+                </div>
+                <div class="command-card">
+                  <span class="command-name">📣 Broadcast</span>
+                  <span class="command-desc">Send or schedule any message to any channel</span>
+                </div>
+                <div class="command-card">
+                  <span class="command-name">🗳️ Poll Generator</span>
+                  <span class="command-desc">AI-generates the monthly poker night vote poll</span>
+                </div>
+                <div class="command-card">
+                  <span class="command-name">⏰ Reminders</span>
+                  <span class="command-desc">Auto-schedules 24h, noon, and 6:30 PM reminders</span>
+                </div>
+                <div class="command-card">
+                  <span class="command-name">📅 Scheduler</span>
+                  <span class="command-desc">Queue any message or poll for future delivery</span>
+                </div>
+                <div class="command-card">
+                  <span class="command-name">🏓 Health Check</span>
+                  <span class="command-desc">Ping the bot to confirm it's alive and responding</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Channels -->
+        <div class="panel" id="panel-channels" style="margin-bottom:20px;">
+          <div class="panel-header collapsible" data-panel="panel-channels">
+            <span class="panel-title">📺 Channels</span>
+            <div class="panel-toggle">
+              <div class="panel-status-badge badge-unknown" id="channels-badge"><span class="badge-dot"></span><span id="channels-badge-text">0 configured</span></div>
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+              Add your Discord channel name → ID pairs. These populate all channel dropdowns.
+            </div>
+            <div style="display:flex;gap:12px;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);margin-bottom:6px;padding:0 10px;">
+              <span style="flex:1">Channel Name</span>
+              <span style="width:16px"></span>
+              <span style="flex:1">Channel ID</span>
+              <span style="width:28px"></span>
+            </div>
+            <div id="channel-list" class="channel-list"></div>
+            <button type="button" class="btn btn-outline btn-sm" id="add-channel-btn" style="width:100%;margin-top:4px;">
+              + Add Channel
+            </button>
+          </div>
+        </div>
+
+        <!-- Join The Table -->
+        <div class="panel" id="panel-join-table">
+          <div class="panel-header collapsible" data-panel="panel-join-table">
+            <span class="panel-title">🃏 Join The Table</span>
+            <div class="panel-toggle">
+              <div class="panel-status-badge badge-unknown" id="join-table-badge"><span class="badge-dot"></span><span id="join-table-badge-text">Not configured</span></div>
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:14px;">
+              Configure the channel that gets revealed when the table goes live, and which Discord categories to move it between.
+            </div>
+
+            <div class="form-group">
+              <label style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Join-the-Game Channel</label>
+              <div class="input-with-btn">
+                <select id="join-table-channel-sel" class="form-control">
+                  <option value="">-- Select Channel --</option>
+                </select>
+                <button type="button" class="btn btn-gold" id="save-join-table-channel-btn">Save</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">The channel the bot posts the table link in and moves between categories</div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-dim);margin-bottom:10px;">Discord Categories</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+              Fetch categories from your server, then assign which category the channel lives in normally (hidden) and which it moves to when the table is live.
+            </div>
+
+            <div class="input-with-btn" style="margin-bottom:8px;">
+              <button type="button" class="btn btn-outline" id="fetch-categories-btn" style="width:100%;">📂 Fetch Categories from Server</button>
+            </div>
+            <div id="fetch-categories-status" style="font-size:11px;color:var(--text-dim);margin-bottom:12px;min-height:16px;"></div>
+
+            <div class="form-group">
+              <label style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Inactive Category <span style="font-weight:400;text-transform:none;letter-spacing:0;">(hidden — e.g. "Inactive Table")</span></label>
+              <div class="input-with-btn">
+                <select id="inactive-category-sel" class="form-control">
+                  <option value="">-- Select Category --</option>
+                </select>
+                <button type="button" class="btn btn-gold" id="save-inactive-cat-btn">Save</button>
+              </div>
+            </div>
+
+            <div class="form-group mt-12">
+              <label style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Active Category <span style="font-weight:400;text-transform:none;letter-spacing:0;">(visible — e.g. "The Pit")</span></label>
+              <div class="input-with-btn">
+                <select id="active-category-sel" class="form-control">
+                  <option value="">-- Select Category --</option>
+                </select>
+                <button type="button" class="btn btn-gold" id="save-active-cat-btn">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- RIGHT: CONTROLS + ACTIVITY LOG -->
+      <div style="display:flex;flex-direction:column;gap:16px;position:sticky;top:80px;">
+
+        <!-- Bot Controls -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">🎮 Bot Controls</span>
+            <div id="heartbeat-display" style="font-size:11px;color:var(--text-dim);">Last seen: —</div>
+          </div>
+          <div class="panel-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <button type="button" class="btn btn-control" id="ctrl-ping-btn">
+                <span class="ctrl-icon">🏓</span>
+                <span class="ctrl-label">Ping Bot</span>
+                <span class="ctrl-sub">Check response time</span>
+              </button>
+              <button type="button" class="btn btn-control" id="ctrl-test-btn">
+                <span class="ctrl-icon">📤</span>
+                <span class="ctrl-label">Test Send</span>
+                <span class="ctrl-sub">Message test channel</span>
+              </button>
+              <button type="button" class="btn btn-control btn-control-warn" id="ctrl-restart-btn">
+                <span class="ctrl-icon">🔄</span>
+                <span class="ctrl-label">Restart Bot</span>
+                <span class="ctrl-sub">PM2 will auto-restart</span>
+              </button>
+              <button type="button" class="btn btn-control" id="ctrl-status-btn">
+                <span class="ctrl-icon">📡</span>
+                <span class="ctrl-label">Force Status</span>
+                <span class="ctrl-sub">Re-check connection</span>
+              </button>
+            </div>
+            <div id="ctrl-feedback" style="margin-top:10px;font-size:12px;color:var(--gold);min-height:18px;text-align:center;"></div>
+          </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="log-header" style="width:100%;">
+              <span class="panel-title">📋 Activity Log</span>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span style="font-size:11px;color:var(--text-dim);white-space:nowrap;">Auto-ping:</span>
+                <select id="autoping-sel" class="form-control" style="padding:3px 8px;font-size:11px;width:auto;">
+                  <option value="0">Off</option>
+                  <option value="1">1 min</option>
+                  <option value="5">5 min</option>
+                  <option value="10">10 min</option>
+                  <option value="15">15 min</option>
+                  <option value="30">30 min</option>
+                  <option value="60">60 min</option>
+                </select>
+                <button type="button" class="btn btn-danger btn-sm" id="clear-log-btn">Clear</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <span style="font-size:11px;color:var(--text-dim);">Real-time feed — newest first · last 1,000 entries</span>
+              <span id="autoping-badge" style="font-size:10px;color:var(--gold);display:none;">● Auto-pinging</span>
+            </div>
+            <div id="log-container" class="log-container">
+              <div style="color:var(--text-dim);padding:16px;text-align:center;font-size:12px;">Loading logs...</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <script type="module" src="js/settings.js"></script>
+</body>
+</html>

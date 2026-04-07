@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Deep crimson background, no rounded corners (iOS adds them) -->
+  <rect width="512" height="512" fill="#8B0000"/>
+  <!-- Subtle inner gradient for depth -->
+  <defs>
+    <radialGradient id="bg-glow" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#B91C1C" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#450000" stop-opacity="0.4"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg-glow)"/>
+  <!-- Spade — scaled from 100x120 viewbox, centered in 512x512 -->
+  <!-- Scale: 3.7, translate: (71, 38) centers the shape -->
+  <g transform="translate(71, 38) scale(3.7)">
+    <path d="M50 5 C50 5 5 38 5 65 C5 82 18 94 35 90 C28 100 22 112 22 112 L78 112 C78 112 72 100 65 90 C82 94 95 82 95 65 C95 38 50 5 50 5Z" fill="#0a0a0f"/>
+  </g>
+  <!-- Subtle gold rim glow around spade -->
+  <g transform="translate(71, 38) scale(3.7)" opacity="0.12">
+    <path d="M50 5 C50 5 5 38 5 65 C5 82 18 94 35 90 C28 100 22 112 22 112 L78 112 C78 112 72 100 65 90 C82 94 95 82 95 65 C95 38 50 5 50 5Z" fill="none" stroke="#d4b254" stroke-width="1.5"/>
+  </g>
+</svg>

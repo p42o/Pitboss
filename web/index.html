@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Pitboss — Shadow Spade Lounge</title>
+  <meta name="theme-color" content="#08080d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Pitboss" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <canvas id="smoke-canvas"></canvas>
+
+  <div class="login-page">
+    <div class="login-card">
+      <div class="login-logo">
+        <svg class="spade-icon" viewBox="0 0 100 120" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+          <path d="M50 5 C50 5 5 38 5 65 C5 82 18 94 35 90 C28 100 22 112 22 112 L78 112 C78 112 72 100 65 90 C82 94 95 82 95 65 C95 38 50 5 50 5Z"/>
+        </svg>
+        <h1>PITBOSS</h1>
+        <p>Shadow Spade Lounge</p>
+      </div>
+
+      <form id="login-form">
+        <div class="form-group">
+          <label for="email">Email</label>
+          <input type="email" id="email" class="form-control" placeholder="dealer@shadowspade.io" required autocomplete="email" />
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" class="form-control" placeholder="••••••••••" required autocomplete="current-password" />
+        </div>
+        <button type="submit" class="btn btn-gold btn-gold-full" id="login-btn">
+          Enter the Room
+        </button>
+        <div id="error-msg" class="error-msg"></div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module">
+    import { login, auth } from './js/auth.js';
+    import { onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+
+    // Smoke canvas animation
+    const canvas = document.getElementById('smoke-canvas');
+    const ctx = canvas.getContext('2d');
+    let particles = [];
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    class SmokeParticle {
+      constructor() { this.reset(); }
+      reset() {
+        this.x = Math.random() * canvas.width;
+        this.y = canvas.height + 20;
+        this.size = Math.random() * 60 + 30;
+        this.speedY = Math.random() * 0.4 + 0.15;
+        this.speedX = (Math.random() - 0.5) * 0.3;
+        this.opacity = Math.random() * 0.06 + 0.02;
+        this.grow = Math.random() * 0.15 + 0.05;
+        this.life = 0;
+        this.maxLife = Math.random() * 300 + 200;
+      }
+      update() {
+        this.y -= this.speedY;
+        this.x += this.speedX + Math.sin(this.life * 0.02) * 0.3;
+        this.size += this.grow;
+        this.life++;
+        const lifeRatio = this.life / this.maxLife;
+        this.currentOpacity = this.opacity * Math.sin(lifeRatio * Math.PI);
+        if (this.life >= this.maxLife || this.y < -this.size) this.reset();
+      }
+      draw() {
+        const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size);
+        grad.addColorStop(0, `rgba(150, 130, 180, ${this.currentOpacity})`);
+        grad.addColorStop(0.5, `rgba(100, 90, 140, ${this.currentOpacity * 0.5})`);
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    for (let i = 0; i < 18; i++) {
+      const p = new SmokeParticle();
+      p.y = Math.random() * canvas.height;
+      p.life = Math.random() * p.maxLife;
+      particles.push(p);
+    }
+
+    function animate() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      particles.forEach(p => { p.update(); p.draw(); });
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    // Redirect if already logged in
+    onAuthStateChanged(auth, (user) => {
+      if (user) window.location.href = 'dashboard.html';
+    });
+
+    const form = document.getElementById('login-form');
+    const errorMsg = document.getElementById('error-msg');
+    const loginBtn = document.getElementById('login-btn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorMsg.classList.remove('show');
+      loginBtn.textContent = 'Entering...';
+      loginBtn.disabled = true;
+
+      try {
+        await login(
+          document.getElementById('email').value.trim(),
+          document.getElementById('password').value
+        );
+        window.location.href = 'dashboard.html';
+      } catch (err) {
+        let msg = 'Invalid credentials. Try again.';
+        if (err.code === 'auth/user-not-found') msg = 'No account found with that email.';
+        else if (err.code === 'auth/wrong-password') msg = 'Incorrect password.';
+        else if (err.code === 'auth/invalid-email') msg = 'Invalid email address.';
+        else if (err.code === 'auth/too-many-requests') msg = 'Too many attempts. Try again later.';
+        errorMsg.textContent = msg;
+        errorMsg.classList.add('show');
+      } finally {
+        loginBtn.textContent = 'Enter the Room';
+        loginBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
