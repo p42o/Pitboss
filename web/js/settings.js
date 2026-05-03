@@ -1006,5 +1006,134 @@ function setChannelsBadge(count) {
 
 initCollapsible();
 
+// ==================== IMAGE / APPROVAL / POKER NIGHT DEFAULTS ====================
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL }
+  from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js';
+import app from './firebase-init.js';
+
+const storage = getStorage(app);
+
+function applyExtendedSettings(s) {
+  // OpenAI key (do not echo back)
+  if (s.openaiKey) {
+    const el = document.getElementById('openai-key');
+    if (el) el.placeholder = 'Saved — paste new key to replace';
+  }
+  if (s.imgurClientId) {
+    const el = document.getElementById('imgur-id');
+    if (el) el.value = s.imgurClientId;
+  }
+  if (s.brandLogoUrl) {
+    const status = document.getElementById('logo-status');
+    const preview = document.getElementById('logo-preview');
+    if (status) status.textContent = 'Logo uploaded ✓';
+    if (preview) preview.innerHTML = `<img src="${s.brandLogoUrl}" alt="logo" style="max-width:160px;max-height:160px;border-radius:8px;border:1px solid var(--border);" />`;
+  }
+  // Approval channel dropdown
+  const approvalSel = document.getElementById('approval-channel-sel');
+  if (approvalSel) populateChannelDropdown(approvalSel, s.channels || [], s.approvalChannelId);
+  if (s.approverUserId) {
+    const el = document.getElementById('approver-id');
+    if (el) el.value = s.approverUserId;
+  }
+  const pnd = s.pokerNightDefaults || {};
+  const fh = document.getElementById('pnd-firsthand');
+  const to = document.getElementById('pnd-tableopen');
+  const off = document.getElementById('pnd-offsets');
+  if (fh) fh.value = pnd.firstHandTime || '7:30 PM CT';
+  if (to) to.value = pnd.tableOpenTime || '7:00 PM CT';
+  if (off) off.value = (pnd.reminderOffsetsMinutes || [1440, 240, 30]).join(', ');
+
+  // Image badge
+  const imgBadge = document.getElementById('image-badge');
+  const imgBadgeText = document.getElementById('image-badge-text');
+  if (imgBadge && imgBadgeText) {
+    const ok = s.openaiKey && s.brandLogoUrl;
+    imgBadge.className = `panel-status-badge ${ok ? 'badge-connected' : 'badge-unknown'}`;
+    imgBadgeText.textContent = ok ? 'Configured' : 'Incomplete';
+  }
+}
+
+// Re-apply once settings have loaded
+const _origApply = applySettingsToUI;
+window.__applyExt = () => applyExtendedSettings(currentSettings);
+const observer = new MutationObserver(() => {});
+// Just hook by monkey-patching loadSettings via a wrapper:
+(async () => {
+  // Wait briefly for loadSettings call at startup
+  setTimeout(() => applyExtendedSettings(currentSettings || {}), 100);
+})();
+
+// Save handlers
+document.getElementById('openai-save-btn')?.addEventListener('click', async () => {
+  const v = document.getElementById('openai-key').value.trim();
+  if (!v) { alert('Paste an OpenAI key.'); return; }
+  await saveSettings({ openaiKey: v });
+  document.getElementById('openai-key').value = '';
+  document.getElementById('openai-key').placeholder = 'Saved — paste new key to replace';
+  await writeLog('success', 'OpenAI key saved.', {});
+  applyExtendedSettings(currentSettings);
+});
+
+document.getElementById('imgur-save-btn')?.addEventListener('click', async () => {
+  const v = document.getElementById('imgur-id').value.trim();
+  if (!v) { alert('Paste an Imgur Client-ID.'); return; }
+  await saveSettings({ imgurClientId: v });
+  await writeLog('success', 'Imgur Client-ID saved.', {});
+});
+
+document.getElementById('logo-upload')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  if (!/png/i.test(file.type)) { alert('Please upload a PNG.'); return; }
+  const status = document.getElementById('logo-status');
+  status.textContent = 'Uploading...';
+  try {
+    const ref = storageRef(storage, 'brand/logo.png');
+    await uploadBytes(ref, file, { contentType: 'image/png' });
+    const url = await getDownloadURL(ref);
+    await saveSettings({ brandLogoUrl: url });
+    status.textContent = 'Logo uploaded ✓';
+    document.getElementById('logo-preview').innerHTML = `<img src="${url}" alt="logo" style="max-width:160px;max-height:160px;border-radius:8px;border:1px solid var(--border);" />`;
+    await writeLog('success', 'Brand logo uploaded.', {});
+    applyExtendedSettings(currentSettings);
+  } catch (err) {
+    console.error(err);
+    status.textContent = 'Upload failed: ' + err.message;
+    await writeLog('error', `Logo upload failed: ${err.message}`, {});
+  }
+});
+
+document.getElementById('save-approval-channel-btn')?.addEventListener('click', async () => {
+  const sel = document.getElementById('approval-channel-sel');
+  const channelId = sel.value;
+  const opt = sel.options[sel.selectedIndex];
+  if (!channelId) { alert('Pick a channel.'); return; }
+  await saveSettings({ approvalChannelId: channelId, approvalChannelName: opt ? opt.textContent.replace('#','') : '' });
+  await writeLog('success', 'Approval channel saved.', {});
+});
+
+document.getElementById('save-approver-btn')?.addEventListener('click', async () => {
+  const v = document.getElementById('approver-id').value.trim();
+  await saveSettings({ approverUserId: v || null });
+  await writeLog('success', 'Approver user saved.', {});
+});
+
+document.getElementById('pnd-save-btn')?.addEventListener('click', async () => {
+  const fh = document.getElementById('pnd-firsthand').value.trim() || '7:30 PM CT';
+  const to = document.getElementById('pnd-tableopen').value.trim() || '7:00 PM CT';
+  const offRaw = document.getElementById('pnd-offsets').value.trim() || '1440, 240, 30';
+  const offsets = offRaw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+  await saveSettings({
+    pokerNightDefaults: {
+      firstHandTime: fh,
+      tableOpenTime: to,
+      reminderOffsetsMinutes: offsets.length ? offsets : [1440, 240, 30]
+    }
+  });
+  await writeLog('success', 'Poker Night defaults saved.', {});
+});
+
 // ==================== INIT ====================
 await loadSettings();
+applyExtendedSettings(currentSettings);

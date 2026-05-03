@@ -236,6 +236,91 @@
           </div>
         </div>
 
+        <!-- Image Generation + Imgur + Approval -->
+        <div class="panel" id="panel-image-approval" style="margin-bottom:20px;">
+          <div class="panel-header collapsible" data-panel="panel-image-approval">
+            <span class="panel-title">🎨 Image &amp; Approval</span>
+            <div class="panel-toggle">
+              <div class="panel-status-badge badge-unknown" id="image-badge"><span class="badge-dot"></span><span id="image-badge-text">Not configured</span></div>
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label for="openai-key" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">OpenAI API Key</label>
+              <div class="input-with-btn">
+                <input type="password" id="openai-key" class="form-control" placeholder="sk-..." autocomplete="off" />
+                <button type="button" class="btn btn-gold" id="openai-save-btn">Save</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Used for gpt-image-1 announcement images.</div>
+            </div>
+
+            <div class="form-group mt-12">
+              <label for="imgur-id" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Imgur Client-ID</label>
+              <div class="input-with-btn">
+                <input type="text" id="imgur-id" class="form-control" placeholder="abc123..." autocomplete="off" />
+                <button type="button" class="btn btn-gold" id="imgur-save-btn">Save</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Get one at api.imgur.com/oauth2/addclient (anonymous usage).</div>
+            </div>
+
+            <div class="form-group mt-12">
+              <label style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Brand Logo (PNG)</label>
+              <input type="file" id="logo-upload" accept="image/png" class="form-control" />
+              <div id="logo-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;">No logo uploaded.</div>
+              <div id="logo-preview" style="margin-top:8px;"></div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="form-group">
+              <label for="approval-channel-sel" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Approval Channel</label>
+              <div class="input-with-btn">
+                <select id="approval-channel-sel" class="form-control">
+                  <option value="">-- Select Channel --</option>
+                </select>
+                <button type="button" class="btn btn-gold" id="save-approval-channel-btn">Save</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Where Pitboss posts the Approve/Edit/Decline card. Default: #clanker.</div>
+            </div>
+
+            <div class="form-group mt-12">
+              <label for="approver-id" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Approver Discord User ID <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)">(optional)</span></label>
+              <div class="input-with-btn">
+                <input type="text" id="approver-id" class="form-control" placeholder="123456789012345678" />
+                <button type="button" class="btn btn-gold" id="save-approver-btn">Save</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">If set, only this user can click approval buttons.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Poker Night Defaults -->
+        <div class="panel" id="panel-pn-defaults" style="margin-bottom:20px;">
+          <div class="panel-header collapsible" data-panel="panel-pn-defaults">
+            <span class="panel-title">🃏 Poker Night Defaults</span>
+            <div class="panel-toggle">
+              <span class="panel-toggle-arrow">▼</span>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label for="pnd-firsthand">First-Hand Time</label>
+              <input type="text" id="pnd-firsthand" class="form-control" placeholder="7:30 PM CT" />
+            </div>
+            <div class="form-group">
+              <label for="pnd-tableopen">Table Opens</label>
+              <input type="text" id="pnd-tableopen" class="form-control" placeholder="7:00 PM CT" />
+            </div>
+            <div class="form-group">
+              <label for="pnd-offsets">Reminder Offsets (minutes before first hand, comma separated)</label>
+              <input type="text" id="pnd-offsets" class="form-control" placeholder="1440, 240, 30" />
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Defaults: 1440 (24h), 240 (4h), 30 (30min)</div>
+            </div>
+            <button type="button" class="btn btn-gold btn-sm" id="pnd-save-btn">Save Defaults</button>
+          </div>
+        </div>
+
         <!-- Join The Table -->
         <div class="panel" id="panel-join-table">
           <div class="panel-header collapsible" data-panel="panel-join-table">

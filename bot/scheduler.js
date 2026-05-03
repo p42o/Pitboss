@@ -146,7 +146,26 @@ async function sendPoll(client, job, writeLog) {
     duration: duration || 168 // hours; 168 = 7 days
   };
 
-  await channel.send({ poll: pollPayload });
+  const sent = await channel.send({ poll: pollPayload });
+
+  // If this poll is part of a vote workflow, advance the workflow.
+  if (job.workflowId) {
+    try {
+      const db = admin.firestore();
+      const closesAt = new Date(Date.now() + (duration || 168) * 3600 * 1000);
+      await db.collection('vote_workflows').doc(job.workflowId).update({
+        status: 'awaiting_results',
+        pollMessageId: sent.id,
+        pollChannelId: job.channelId,
+        pollSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        pollClosesAt: admin.firestore.Timestamp.fromDate(closesAt)
+      });
+      await writeLog('vote_open', `Vote opened for workflow ${job.workflowId.slice(0,6)}; closes ${closesAt.toISOString()}.`, { workflowId: job.workflowId });
+    } catch (wfErr) {
+      console.warn('[Scheduler] Workflow advance failed:', wfErr.message);
+      await writeLog('warning', `Failed to advance vote workflow: ${wfErr.message}`, { workflowId: job.workflowId });
+    }
+  }
 }
 
 /**

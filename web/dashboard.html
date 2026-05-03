@@ -50,9 +50,129 @@
   </nav>
 
   <div class="main-content">
+
+    <!-- ==================== TOP: UPCOMING QUEUE ==================== -->
+    <div class="panel upcoming-panel" style="margin-bottom:24px;">
+      <div class="panel-header">
+        <span class="panel-title">📅 Upcoming Queue</span>
+        <span class="queue-count-badge" id="queue-count-badge" style="display:none;"></span>
+      </div>
+      <div class="panel-body" style="padding:16px 20px;">
+        <div id="unified-queue" class="unified-queue">
+          <div class="queue-empty">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== POKER NIGHT WORKFLOW (unified) ==================== -->
+    <div class="panel pokernight-panel" id="dash-panel-pokernight" style="margin-bottom:24px;">
+      <div class="panel-header collapsible" data-panel="dash-panel-pokernight">
+        <span class="panel-title">🃏 Poker Night Workflow</span>
+        <div class="panel-toggle">
+          <span class="pn-status-pill" id="pn-status-pill">Idle</span>
+          <span class="panel-toggle-arrow">▼</span>
+        </div>
+      </div>
+      <div class="panel-body">
+
+        <!-- Workflow stepper -->
+        <div class="pn-stepper">
+          <div class="pn-step active" data-step="vote"><span class="pn-step-num">1</span><span class="pn-step-label">Schedule Vote</span></div>
+          <div class="pn-step" data-step="watch"><span class="pn-step-num">2</span><span class="pn-step-label">Watch Results</span></div>
+          <div class="pn-step" data-step="generate"><span class="pn-step-num">3</span><span class="pn-step-label">Generate</span></div>
+          <div class="pn-step" data-step="approve"><span class="pn-step-num">4</span><span class="pn-step-label">Approve</span></div>
+          <div class="pn-step" data-step="schedule"><span class="pn-step-num">5</span><span class="pn-step-label">Schedule</span></div>
+        </div>
+
+        <div class="section-divider-label">Step 1 — Schedule the Vote</div>
+
+        <div class="row-2col" style="margin-bottom:10px;">
+          <div class="form-group" style="margin:0;">
+            <label for="pn-month">Month</label>
+            <select id="pn-month" class="form-control">
+              <option value="01">January</option><option value="02">February</option>
+              <option value="03">March</option><option value="04">April</option>
+              <option value="05">May</option><option value="06">June</option>
+              <option value="07">July</option><option value="08">August</option>
+              <option value="09">September</option><option value="10">October</option>
+              <option value="11">November</option><option value="12">December</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label for="pn-year">Year</label>
+            <select id="pn-year" class="form-control"></select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="pn-vote-datetime">Vote Send Time (CT)</label>
+          <input type="datetime-local" id="pn-vote-datetime" class="form-control" />
+        </div>
+
+        <div class="form-group">
+          <label for="pn-vote-channel">Vote Channel</label>
+          <select id="pn-vote-channel" class="form-control channel-dropdown" data-default="announcements"></select>
+        </div>
+
+        <div id="pn-poll-preview-wrap" class="poll-options-preview" style="margin-top:12px;"></div>
+
+        <div class="btn-row" style="margin-top:12px;">
+          <button type="button" class="btn btn-outline btn-sm" id="pn-gen-poll-btn">✨ Generate Vote</button>
+          <button type="button" class="btn btn-gold btn-sm" id="pn-schedule-vote-btn">📅 Schedule Vote + Workflow</button>
+        </div>
+
+        <div class="divider" style="margin:18px 0;"></div>
+
+        <!-- Edit-mode preview area: shown when bot generated content awaiting approval/edit -->
+        <div id="pn-edit-mode-wrap" class="pn-edit-wrap" style="display:none;">
+          <div class="section-divider-label">📝 Edit Mode — Bot's Generated Draft</div>
+          <div style="font-size:12px;color:var(--amber-text);margin-bottom:10px;">
+            The bot is awaiting approval, or you declined the auto-generated draft. Edit below and resubmit.
+          </div>
+
+          <div class="form-group">
+            <label for="pn-edit-text">Announcement Text</label>
+            <textarea id="pn-edit-text" class="compose-area" style="min-height:240px;font-size:13px;line-height:1.7;"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label for="pn-edit-image">Announcement Image URL</label>
+            <input type="url" id="pn-edit-image" class="form-control" placeholder="https://i.imgur.com/..." />
+            <div id="pn-edit-image-preview" style="margin-top:8px;"></div>
+          </div>
+
+          <div class="form-group">
+            <label for="pn-edit-firsthand">First-Hand Time (CT)</label>
+            <input type="datetime-local" id="pn-edit-firsthand" class="form-control" />
+          </div>
+
+          <div class="form-group">
+            <label for="pn-edit-channel">Announce Channel</label>
+            <select id="pn-edit-channel" class="form-control channel-dropdown" data-default="announcements"></select>
+          </div>
+
+          <div class="form-group">
+            <label for="pn-edit-rem-channel">Reminders Channel</label>
+            <select id="pn-edit-rem-channel" class="form-control channel-dropdown" data-default="riff-room"></select>
+          </div>
+
+          <div class="btn-row" style="margin-top:12px;">
+            <button type="button" class="btn btn-gold" id="pn-resubmit-btn">✅ Approve &amp; Schedule All</button>
+            <button type="button" class="btn btn-outline btn-sm" id="pn-cancel-edit-btn">Cancel</button>
+          </div>
+        </div>
+
+        <div class="section-divider-label">Active Workflows</div>
+        <div id="pn-workflows-list" class="pn-workflows-list">
+          <div class="queue-empty">No active workflows.</div>
+        </div>
+
+      </div>
+    </div>
+
     <div class="columns">
 
-      <!-- ==================== COLUMN 1: BROADCAST ==================== -->
+      <!-- ==================== BROADCAST ==================== -->
       <div class="panel" id="dash-panel-broadcast">
         <div class="panel-header collapsible" data-panel="dash-panel-broadcast">
           <span class="panel-title">📣 Broadcast</span>
@@ -74,8 +194,8 @@
           </div>
 
           <div class="form-group mt-12">
-            <label for="msg-channel" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Channel</label>
-            <select id="msg-channel" class="form-control channel-dropdown"></select>
+            <label for="msg-channel">Channel</label>
+            <select id="msg-channel" class="form-control channel-dropdown" data-default="announcements"></select>
           </div>
 
           <div class="btn-row" style="margin-top:10px;align-items:center;">
@@ -97,165 +217,49 @@
         </div>
       </div>
 
-      <!-- ==================== COLUMN 2: POLL GENERATOR ==================== -->
-      <div class="panel" id="dash-panel-poll">
-        <div class="panel-header collapsible" data-panel="dash-panel-poll">
-          <span class="panel-title">🗳️ Poker Night Vote</span>
+      <!-- ==================== JOIN THE TABLE ==================== -->
+      <div class="panel" id="dash-panel-jointable">
+        <div class="panel-header collapsible" data-panel="dash-panel-jointable">
+          <span class="panel-title">🃏 Join The Table</span>
           <div class="panel-toggle">
             <span class="panel-toggle-arrow">▼</span>
           </div>
         </div>
         <div class="panel-body">
-          <div class="row-2col" style="margin-bottom:10px;">
-            <div class="form-group" style="margin:0;">
-              <label for="poll-month" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Month</label>
-              <select id="poll-month" class="form-control">
-                <option value="01">January</option>
-                <option value="02">February</option>
-                <option value="03">March</option>
-                <option value="04">April</option>
-                <option value="05">May</option>
-                <option value="06">June</option>
-                <option value="07">July</option>
-                <option value="08">August</option>
-                <option value="09">September</option>
-                <option value="10">October</option>
-                <option value="11">November</option>
-                <option value="12">December</option>
-              </select>
-            </div>
-            <div class="form-group" style="margin:0;">
-              <label for="poll-year" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Year</label>
-              <select id="poll-year" class="form-control"></select>
-            </div>
+          <div id="table-config-warn" style="display:none;font-size:12px;color:var(--amber-text);padding:9px 12px;background:rgba(95,58,30,0.15);border:1px solid rgba(251,191,36,0.2);border-radius:8px;margin-bottom:12px;">
+            ⚠️ Configure Join-the-Table settings in <a href="settings.html" style="color:var(--gold);">Settings → 🃏 Join The Table</a> first.
           </div>
 
-          <button type="button" class="btn btn-gold" id="poll-gen-btn" style="width:100%;margin-bottom:12px;">
-            ✨ Generate Poll
-          </button>
-
-          <div id="poll-preview-wrap" class="poll-options-preview"></div>
-
-          <div class="form-group mt-12">
-            <label for="poll-channel" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;">Channel</label>
-            <select id="poll-channel" class="form-control channel-dropdown"></select>
+          <div class="form-group">
+            <label for="table-url">PokerNow Table URL</label>
+            <input type="url" id="table-url" class="form-control" placeholder="https://www.pokernow.com/games/..." />
           </div>
 
-          <div class="btn-row" style="margin-top:8px;">
-            <button type="button" class="btn btn-outline btn-sm" id="poll-btn-test">🧪 Test</button>
-            <button type="button" class="btn btn-gold btn-sm" id="poll-btn-send">⚡ Send Now</button>
-            <button type="button" class="btn btn-outline btn-sm" id="poll-btn-schedule">📅 Schedule</button>
+          <div class="form-group">
+            <label for="table-schedule-time">Post Time (CT)</label>
+            <input type="datetime-local" id="table-schedule-time" class="form-control" />
           </div>
 
-          <div class="schedule-picker" id="poll-schedule-picker">
-            <label>Date & Time (Central Time)</label>
-            <input type="datetime-local" class="form-control" id="poll-schedule-datetime" style="margin-bottom:8px;" />
-            <button type="button" class="btn btn-gold btn-sm" id="poll-btn-confirm-schedule">Confirm Schedule</button>
-          </div>
+          <div id="table-preview" style="display:none;padding:10px 14px;background:rgba(212,178,84,0.05);border:1px solid rgba(212,178,84,0.15);border-radius:8px;font-size:13px;line-height:1.8;color:var(--text-primary);white-space:pre-wrap;margin-bottom:10px;font-family:'JetBrains Mono',monospace;"></div>
 
-        </div>
-      </div>
-
-      <!-- ==================== COLUMN 3: ANNOUNCE & REMIND ==================== -->
-      <div class="panel" id="dash-panel-remind">
-        <div class="panel-header collapsible" data-panel="dash-panel-remind">
-          <span class="panel-title">📣 Announce & ⏰ Remind</span>
-          <div class="panel-toggle">
-            <span class="panel-toggle-arrow">▼</span>
+          <div class="btn-row">
+            <button type="button" class="btn btn-outline btn-sm" id="table-btn-test">🧪 Test</button>
+            <button type="button" class="btn btn-gold btn-sm" id="table-btn-schedule">📅 Schedule</button>
           </div>
         </div>
-        <div class="panel-body">
-  <!-- SHARED: Poker Night Date -->
-  <div class="form-group">
-    <label for="poker-date">Next Poker Night (CT)</label>
-    <input type="datetime-local" id="poker-date" class="form-control" />
-  </div>
-
-  <!-- ========== ANNOUNCEMENT GENERATOR ========== -->
-  <div class="section-divider-label">Announcement</div>
-
-  <div class="form-group">
-    <label for="announce-channel">Channel</label>
-    <select id="announce-channel" class="form-control channel-dropdown"></select>
-  </div>
-
-  <div class="form-group">
-    <label for="announce-image-url">Image URL <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)">(optional — posts 1–2s before announcement)</span></label>
-    <input type="url" id="announce-image-url" class="form-control" placeholder="https://i.imgur.com/..." />
-  </div>
-
-  <button type="button" class="btn btn-gold" id="announce-gen-btn" style="width:100%;margin-bottom:12px;">
-    📣 Generate Announcement
-  </button>
-
-  <div id="announce-preview-wrap" style="display:none;">
-    <textarea id="announce-preview-text" class="compose-area" style="min-height:240px;font-family:Inter,sans-serif;font-size:13px;line-height:1.7;"></textarea>
-    <div class="btn-row" style="margin-top:10px;">
-      <button type="button" class="btn btn-outline btn-sm" id="announce-btn-test">🧪 Test</button>
-      <button type="button" class="btn btn-gold btn-sm" id="announce-btn-send">⚡ Send Now</button>
-      <button type="button" class="btn btn-outline btn-sm" id="announce-btn-schedule">📅 Schedule</button>
-    </div>
-    <div class="schedule-picker" id="announce-schedule-picker">
-      <label>Date & Time (Central Time)</label>
-      <input type="datetime-local" class="form-control" id="announce-schedule-datetime" style="margin-bottom:8px;" />
-      <button type="button" class="btn btn-gold btn-sm" id="announce-btn-confirm-schedule">Confirm Schedule</button>
-    </div>
-  </div>
-
-  <div class="divider" style="margin:18px 0;"></div>
-
-  <!-- ========== REMINDER GENERATOR ========== -->
-  <div class="section-divider-label">Reminders</div>
-
-  <button type="button" class="btn btn-gold" id="reminders-gen-btn" style="width:100%;margin-bottom:12px;">
-    ⏰ Generate Reminders
-  </button>
-
-  <div id="reminders-container"></div>
-
-  <button type="button" class="btn btn-gold schedule-all-btn" id="reminders-schedule-all">
-    📅 Schedule All 3
-  </button>
-
-  <div class="divider" style="margin:20px 0;"></div>
-
-  <!-- ========== JOIN THE TABLE ========== -->
-  <div class="section-divider-label">Join The Table</div>
-
-  <div id="table-config-warn" style="display:none;font-size:12px;color:var(--amber-text);padding:9px 12px;background:rgba(95,58,30,0.15);border:1px solid rgba(251,191,36,0.2);border-radius:8px;margin-bottom:12px;">
-    ⚠️ Configure Join-the-Table settings in <a href="settings.html" style="color:var(--gold);">Settings → 🃏 Join The Table</a> first.
-  </div>
-
-  <div class="form-group">
-    <label for="table-url">PokerNow Table URL</label>
-    <input type="url" id="table-url" class="form-control" placeholder="https://www.pokernow.com/games/..." />
-  </div>
-
-  <div class="form-group">
-    <label for="table-schedule-time">Post Time (CT)</label>
-    <input type="datetime-local" id="table-schedule-time" class="form-control" />
-  </div>
-
-  <div id="table-preview" style="display:none;padding:10px 14px;background:rgba(212,178,84,0.05);border:1px solid rgba(212,178,84,0.15);border-radius:8px;font-size:13px;line-height:1.8;color:var(--text-primary);white-space:pre-wrap;margin-bottom:10px;font-family:'JetBrains Mono',monospace;"></div>
-
-  <div class="btn-row">
-    <button type="button" class="btn btn-outline btn-sm" id="table-btn-test">🧪 Test</button>
-    <button type="button" class="btn btn-gold btn-sm" id="table-btn-schedule">📅 Schedule</button>
-  </div>
-</div>
       </div>
 
     </div>
 
-    <!-- ==================== FULL-WIDTH UPCOMING QUEUE ==================== -->
-    <div class="panel upcoming-panel" style="margin-top:24px;">
+    <!-- ==================== ACTIVITY LOG (full width, bottom) ==================== -->
+    <div class="panel activity-log-panel" style="margin-top:24px;">
       <div class="panel-header">
-        <span class="panel-title">📅 Upcoming Queue</span>
-        <span class="queue-count-badge" id="queue-count-badge" style="display:none;"></span>
+        <span class="panel-title">📋 Activity Log</span>
+        <span class="activity-count-badge" id="activity-count-badge"></span>
       </div>
       <div class="panel-body" style="padding:16px 20px;">
-        <div id="unified-queue" class="unified-queue">
-          <div class="queue-empty">Loading...</div>
+        <div id="activity-log-list" class="activity-log-list">
+          <div class="queue-empty">Loading logs...</div>
         </div>
       </div>
     </div>

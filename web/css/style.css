@@ -1620,3 +1620,183 @@ select.form-control option {
     -webkit-tap-highlight-color: transparent;
   }
 }
+
+/* ==================== POKER NIGHT WORKFLOW (unified) ==================== */
+.pokernight-panel {
+  background: linear-gradient(135deg, rgba(212,178,84,0.04), rgba(58,30,95,0.04));
+  border: 1px solid rgba(212,178,84,0.25);
+}
+.pokernight-panel .panel-header { border-bottom: 1px solid rgba(212,178,84,0.18); }
+
+.pn-status-pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(212,178,84,0.12);
+  color: var(--gold);
+  border: 1px solid rgba(212,178,84,0.3);
+  margin-right: 10px;
+}
+.pn-status-pill.pill-vote { background: rgba(58,30,95,0.3); color: var(--purple-text); border-color: rgba(192,132,252,0.3); }
+.pn-status-pill.pill-watching { background: rgba(95,58,30,0.3); color: var(--amber-text); border-color: rgba(251,191,36,0.3); }
+.pn-status-pill.pill-pending { background: rgba(212,178,84,0.18); color: var(--gold); }
+.pn-status-pill.pill-approved { background: rgba(45,122,79,0.25); color: var(--green-text); border-color: rgba(74,222,128,0.3); }
+.pn-status-pill.pill-declined { background: rgba(122,45,45,0.25); color: var(--red-text); border-color: rgba(248,113,113,0.3); }
+.pn-status-pill.pill-edit { background: rgba(95,58,30,0.3); color: var(--amber-text); }
+
+.pn-stepper {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 18px;
+  padding: 10px 6px;
+  border-radius: 10px;
+  background: rgba(8,8,13,0.4);
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+.pn-step {
+  flex: 1;
+  min-width: 100px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.pn-step.active {
+  background: rgba(212,178,84,0.12);
+  color: var(--gold);
+}
+.pn-step.done {
+  color: var(--green-text);
+}
+.pn-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: rgba(212,178,84,0.2);
+  font-weight: 700;
+  font-size: 11px;
+  color: var(--gold);
+}
+.pn-step.active .pn-step-num { background: var(--gold); color: #08080d; }
+.pn-step.done .pn-step-num { background: var(--green-text); color: #08080d; }
+.pn-step-label { font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+
+.pn-edit-wrap {
+  background: rgba(95,58,30,0.08);
+  border: 1px dashed rgba(251,191,36,0.3);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 18px;
+}
+#pn-edit-image-preview img {
+  max-width: 100%;
+  max-height: 240px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.pn-workflows-list {
+  display: grid;
+  gap: 10px;
+}
+.pn-workflow-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--gold);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: rgba(20,20,28,0.5);
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.pn-workflow-card .pn-wf-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.pn-workflow-card .pn-wf-title {
+  color: var(--gold);
+  font-weight: 600;
+  font-size: 13px;
+}
+.pn-workflow-card .pn-wf-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.pn-workflow-card .pn-wf-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* ==================== ACTIVITY LOG (dashboard, bottom panel) ==================== */
+.activity-log-panel {
+  background: linear-gradient(135deg, rgba(20,20,28,0.7), rgba(8,8,13,0.7));
+  border: 1px solid var(--border);
+}
+.activity-count-badge {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(212,178,84,0.08);
+  border: 1px solid rgba(212,178,84,0.2);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.activity-log-list {
+  display: grid;
+  gap: 6px;
+  max-height: 600px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.activity-log-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border-radius: 8px;
+  background: rgba(20,20,28,0.5);
+  border-left: 3px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  transition: background 0.15s;
+}
+.activity-log-row:hover { background: rgba(212,178,84,0.04); }
+.activity-log-emoji { font-size: 16px; line-height: 1; text-align: center; }
+.activity-log-msg { color: var(--text-primary); line-height: 1.5; }
+.activity-log-time { color: var(--text-dim); font-size: 10.5px; font-family: 'JetBrains Mono', monospace; white-space: nowrap; }
+
+.activity-log-row.lt-sent { border-left-color: var(--blue-text); }
+.activity-log-row.lt-scheduled { border-left-color: var(--purple-text); }
+.activity-log-row.lt-error { border-left-color: var(--red-text); background: rgba(122,45,45,0.08); }
+.activity-log-row.lt-warning { border-left-color: var(--amber-text); }
+.activity-log-row.lt-success { border-left-color: var(--green-text); }
+.activity-log-row.lt-connection { border-left-color: var(--gold); }
+.activity-log-row.lt-reply { border-left-color: var(--purple-text); }
+.activity-log-row.lt-vote_open { border-left-color: var(--purple-text); }
+.activity-log-row.lt-vote_closed { border-left-color: var(--gold); }
+.activity-log-row.lt-image_generated { border-left-color: #ec4899; }
+.activity-log-row.lt-imgur_uploaded { border-left-color: #06b6d4; }
+.activity-log-row.lt-approval_pending { border-left-color: var(--amber-text); }
+.activity-log-row.lt-approved { border-left-color: var(--green-text); }
+.activity-log-row.lt-declined { border-left-color: var(--red-text); }
+
+/* Subtle facelift: section dividers spacing */
+.section-divider-label { margin-top: 14px; }
+
+/* Pokernight panel: tighter form gap */
+.pokernight-panel .form-group { margin-bottom: 12px; }

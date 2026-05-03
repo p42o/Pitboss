@@ -1,7 +1,8 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, ActivityType, Events } = require('discord.js');
+const { Client, GatewayIntentBits, ActivityType, Events, PermissionsBitField } = require('discord.js');
 const admin = require('firebase-admin');
 const { startScheduler } = require('./scheduler');
+const { startVoteWatcher } = require('./voteWatcher');
 
 // ==================== FIREBASE INIT ====================
 const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -59,6 +60,7 @@ client.once('ready', async () => {
 
   await writeLog('connection', `Bot online as ${tag}`, { tag });
   startScheduler(client, db, writeLog);
+  startVoteWatcher(client, db, writeLog);
   startHeartbeat(tag);
   await cleanupStalePendingCommands();
   await cleanupOldDocuments();
@@ -341,6 +343,155 @@ client.on(Events.MessageCreate, async (message) => {
     await message.reply("I got nothin'. Come back when the system ain't broke.").catch(() => {});
   }
 });
+
+// ==================== APPROVAL BUTTON HANDLER ====================
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isButton()) return;
+  const id = interaction.customId || '';
+  if (!id.startsWith('pn-')) return;
+
+  const [action, workflowId] = id.split(':');
+  if (!workflowId) return;
+
+  // Permission check: bot owner (approverUserId) OR admin perms in this guild OR
+  // anyone — fall through to allowing anyone in clanker if no approverUserId set.
+  try {
+    const settingsSnap = await db.collection('settings').doc('config').get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : {};
+    const approverId = settings.approverUserId;
+
+    let allowed = false;
+    if (approverId) {
+      allowed = interaction.user.id === approverId;
+    } else {
+      // Allow if member has Manage Guild / Administrator
+      const member = interaction.member;
+      if (member && typeof member.permissions !== 'string' && member.permissions?.has) {
+        allowed = member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+                  member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+      }
+      // Otherwise allow anyone (button is in #clanker, an admin-only channel by convention)
+      if (!allowed) allowed = true;
+    }
+    if (!allowed) {
+      await interaction.reply({ content: 'You ain\'t cleared to approve this.', ephemeral: true });
+      return;
+    }
+
+    const wfRef = db.collection('vote_workflows').doc(workflowId);
+    const wfSnap = await wfRef.get();
+    if (!wfSnap.exists) {
+      await interaction.reply({ content: 'Workflow not found.', ephemeral: true });
+      return;
+    }
+    const wf = wfSnap.data();
+
+    if (action === 'pn-approve') {
+      // Schedule announcement + 3 reminders
+      const firstHandDate = wf.computedFirstHandUtc?.toDate ? wf.computedFirstHandUtc.toDate() : new Date(wf.computedFirstHandUtc);
+      if (!firstHandDate || isNaN(+firstHandDate)) {
+        await interaction.reply({ content: 'Workflow missing first-hand date.', ephemeral: true });
+        return;
+      }
+      const offsets = wf.reminderOffsets || [1440, 240, 30];
+      const announceChannelId = wf.announceChannelId;
+      const announceChannelName = wf.announceChannelName || 'announcements';
+      const reminderChannelId = wf.reminderChannelId || announceChannelId;
+      const reminderChannelName = wf.reminderChannelName || announceChannelName;
+
+      // Announcement: send immediately
+      await db.collection('scheduled_jobs').add({
+        type: 'announcement',
+        channelId: announceChannelId,
+        channelName: announceChannelName,
+        content: wf.generatedAnnouncementText,
+        imageUrl: wf.generatedImageUrl || null,
+        scheduledFor: admin.firestore.Timestamp.now(),
+        status: 'pending',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        workflowId,
+        sentAt: null, error: null
+      });
+
+      // Reminders: relative to firstHand, offsets in minutes
+      const reminderTexts = buildDefaultReminderTexts(firstHandDate, wf.gameTime, wf.tableOpenTime);
+      for (let i = 0; i < offsets.length; i++) {
+        const t = new Date(firstHandDate.getTime() - offsets[i] * 60 * 1000);
+        if (t <= new Date()) continue;
+        await db.collection('scheduled_jobs').add({
+          type: 'reminder',
+          channelId: reminderChannelId,
+          channelName: reminderChannelName,
+          content: reminderTexts[i] || `Reminder: poker is coming up.`,
+          scheduledFor: admin.firestore.Timestamp.fromDate(t),
+          status: 'pending',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          workflowId,
+          sentAt: null, error: null
+        });
+      }
+
+      await wfRef.update({
+        status: 'approved',
+        approvedAt: admin.firestore.FieldValue.serverTimestamp(),
+        approvedBy: interaction.user.id,
+        approvedSource: 'discord_button'
+      });
+
+      const sendStr = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' }).format(new Date());
+      await interaction.update({
+        content: `✅ **APPROVED** — sending now (${sendStr} CT). Reminders scheduled.`,
+        components: []
+      });
+      await writeLog('approved', `Workflow ${workflowId.slice(0,6)} approved by ${interaction.user.tag}.`, { workflowId });
+
+    } else if (action === 'pn-decline') {
+      await wfRef.update({
+        status: 'declined',
+        declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        declinedBy: interaction.user.id,
+        declinedSource: 'discord_button'
+      });
+      await interaction.update({
+        content: `❌ **DECLINED** — workflow ${workflowId.slice(0,6)} cancelled.`,
+        components: []
+      });
+      await writeLog('declined', `Workflow ${workflowId.slice(0,6)} declined by ${interaction.user.tag}.`, { workflowId });
+
+    } else if (action === 'pn-edit') {
+      await wfRef.update({
+        status: 'edit_mode',
+        editRequestedAt: admin.firestore.FieldValue.serverTimestamp(),
+        editRequestedBy: interaction.user.id
+      });
+      await interaction.update({
+        content: `✏️ **EDIT MODE** — open the dashboard to edit and resubmit. Workflow \`${workflowId}\`.`,
+        components: []
+      });
+      await writeLog('warning', `Workflow ${workflowId.slice(0,6)} sent to edit mode by ${interaction.user.tag}.`, { workflowId });
+    }
+  } catch (e) {
+    console.error('[Pitboss] Approval interaction error:', e);
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: `Error: ${e.message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Error: ${e.message}`, ephemeral: true });
+      }
+    } catch (_) {}
+    await writeLog('error', `Approval interaction failed: ${e.message}`, {});
+  }
+});
+
+function buildDefaultReminderTexts(firstHandDate, gameTime, tableOpenTime) {
+  const firstHandStr = gameTime || '7:30 PM CT';
+  const tableOpenStr = tableOpenTime || '7:00 PM CT';
+  return [
+    `🃏 Poker night is tomorrow at ${firstHandStr}! Hope to see everyone at the tables. 🂡`,
+    `🎰 Heads up — Poker Night is in ~4 hours. First hand at ${firstHandStr}. Get your chips ready. ♠️`,
+    `🂡 30 minutes out! Table opens at 7 — first hand at 7:30. @everyone don't be late! ♣️`
+  ];
+}
 
 // ==================== START ====================
 async function resolveToken() {

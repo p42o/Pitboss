@@ -2,7 +2,7 @@ import { requireAuth, logout } from './auth.js';
 import { db } from './firebase-init.js';
 import {
   collection, doc, getDoc, addDoc, deleteDoc, onSnapshot,
-  query, where, orderBy, Timestamp, serverTimestamp, updateDoc
+  query, where, orderBy, limit, Timestamp, serverTimestamp, updateDoc, setDoc
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { initParticles } from './particles.js';
 import { initNavStats } from './nav-stats.js';
@@ -24,20 +24,17 @@ function ctDateStr(date) {
   }).format(date);
 }
 
-function ctTimeStr(date) {
+function ctTimeShort(date) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Chicago',
     hour: 'numeric', minute: '2-digit', hour12: true
-  }).format(date) + ' CT';
+  }).format(date);
 }
 
 function localDatetimeToUTC(localStr) {
-  // localStr is "YYYY-MM-DDTHH:MM" treated as CT
   const [datePart, timePart] = localStr.split('T');
   const [year, month, day] = datePart.split('-').map(Number);
   const [hour, minute] = timePart.split(':').map(Number);
-  // Use Intl trick: create date as if UTC, then adjust
-  // We format a test date in CT to find the offset
   const testDate = new Date(Date.UTC(year, month - 1, day, hour, minute));
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Chicago',
@@ -54,58 +51,58 @@ function localDatetimeToUTC(localStr) {
   return new Date(testDate.getTime() + diffMs);
 }
 
+function dateToLocalDatetimeStr(d) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  });
+  const parts = fmt.formatToParts(d);
+  const y = parts.find(p => p.type === 'year').value;
+  const m = parts.find(p => p.type === 'month').value;
+  const day = parts.find(p => p.type === 'day').value;
+  const hour = parts.find(p => p.type === 'hour').value.padStart(2,'0');
+  const min = parts.find(p => p.type === 'minute').value;
+  return `${y}-${m}-${day}T${hour === '24' ? '00' : hour}:${min}`;
+}
+
 function renderDiscordMarkdown(text) {
   if (!text) return '';
-  let html = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  // Code blocks first
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre><code>${code.trim()}</code></pre>`);
-  // Inline code
+  let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold italic
   html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
-  // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Italic *
   html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
-  // Italic _
   html = html.replace(/_([^_\n]+)_/g, '<em>$1</em>');
-  // Underline
   html = html.replace(/__(.+?)__/g, '<u>$1</u>');
-  // Strikethrough
   html = html.replace(/~~(.+?)~~/g, '<s>$1</s>');
-  // Quotes
   html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
-  // Line breaks
   html = html.replace(/\n/g, '<br>');
   return html;
 }
 
 async function writeLog(type, message, metadata = {}) {
   try {
-    await addDoc(collection(db, 'logs'), {
-      type, message, metadata,
-      timestamp: serverTimestamp()
-    });
+    await addDoc(collection(db, 'logs'), { type, message, metadata, timestamp: serverTimestamp() });
   } catch (e) { console.error('Log write failed', e); }
 }
 
 // ==================== SETTINGS LOAD ====================
-let settings = { channels: [], testChannelId: '', testChannelName: '', openrouterKey: '', openrouterModel: 'google/gemini-flash-1.5' };
+let settings = {
+  channels: [], testChannelId: '', testChannelName: '',
+  openrouterKey: '', openrouterModel: 'google/gemini-2.0-flash-lite-001',
+  pokerNightDefaults: {},
+  lastChannels: {}
+};
 
-// ==================== ANNOUNCEMENT CONSTANTS ====================
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-
 const MONTH_EMOJIS = {
   1: ['❄️','⛄'], 2: ['❤️','🌹'], 3: ['🍀','☘️'],
   4: ['🌸','🌷'], 5: ['🌻','🌺'], 6: ['☀️','🌊'],
   7: ['🎆','🦅'], 8: ['🌅','🏖️'], 9: ['🍂','🏈'],
   10: ['🎃','👻'], 11: ['🦃','🍁'], 12: ['🎄','⛄']
 };
-
 const MEMO_WORDS = {
   1: ['snowflake','frostbite','blizzard','glacier','arctic','icicle'],
   2: ['valentine','sweetheart','cupid','cardinal','candlelight','rosewood'],
@@ -121,12 +118,16 @@ const MEMO_WORDS = {
   12: ['chimney','mistletoe','snowcap','garland','figpudding','sugarplum']
 };
 
+function findChannelByName(name) {
+  if (!settings.channels || !name) return null;
+  const lc = String(name).toLowerCase();
+  return settings.channels.find(c => (c.name || '').toLowerCase() === lc) || null;
+}
+
 async function loadSettings() {
   try {
     const snap = await getDoc(doc(db, 'settings', 'config'));
-    if (snap.exists()) {
-      settings = { ...settings, ...snap.data() };
-    }
+    if (snap.exists()) settings = { ...settings, ...snap.data() };
   } catch (e) { console.error('Settings load error', e); }
   populateChannelDropdowns();
 }
@@ -134,7 +135,13 @@ async function loadSettings() {
 function populateChannelDropdowns() {
   const dropdowns = document.querySelectorAll('.channel-dropdown');
   dropdowns.forEach(sel => {
+    const dropdownId = sel.id;
+    const defaultName = sel.dataset.default;
+    // Priority: previously persisted choice > default channel name > current value
+    const lastChannels = settings.lastChannels || {};
+    const persisted = lastChannels[dropdownId];
     const current = sel.value;
+
     sel.innerHTML = '<option value="">-- Select Channel --</option>';
     if (!settings.channels || settings.channels.length === 0) {
       sel.innerHTML = '<option value="">No channels configured</option>';
@@ -144,9 +151,29 @@ function populateChannelDropdowns() {
       const opt = document.createElement('option');
       opt.value = ch.id;
       opt.textContent = `#${ch.name}`;
-      if (ch.id === current) opt.selected = true;
       sel.appendChild(opt);
     });
+
+    let toSelect = '';
+    if (persisted && settings.channels.find(c => c.id === persisted)) {
+      toSelect = persisted;
+    } else if (current && settings.channels.find(c => c.id === current)) {
+      toSelect = current;
+    } else if (defaultName) {
+      const match = findChannelByName(defaultName);
+      if (match) toSelect = match.id;
+    }
+    if (toSelect) sel.value = toSelect;
+
+    // Persist on change
+    sel.addEventListener('change', async () => {
+      try {
+        const cur = settings.lastChannels || {};
+        cur[dropdownId] = sel.value;
+        settings.lastChannels = cur;
+        await setDoc(doc(db, 'settings', 'config'), { lastChannels: cur }, { merge: true });
+      } catch (e) { console.error('Persist last channel error', e); }
+    }, { once: false });
   });
 }
 
@@ -154,19 +181,15 @@ await loadSettings();
 
 // ==================== EMOJI PICKER ====================
 const EMOJI_DATA = {
-  'Smileys': ['😀','😁','😂','🤣','😃','😄','😅','😆','😉','😊','😋','😎','😍','🥰','😘','😗','😙','😚','🙂','🤗','🤩','🤔','🤨','😐','😑','😶','🙄','😏','😣','😥','😮','🤐','😯','😪','😫','🥱','😴','😌','😛','😜','😝','🤤','😒','😓','😔','😕','🙃','🤑','😲','☹️','🙁','😖','😞','😟','😤','😢','😭','😦','😧','😨','😩','🤯','😬','😰','😱','🥵','🥶','😳','🤪','😵','🥴','😠','😡','🤬','😷','🤒','🤕','🤢','🤮','🤧','😇','🥳','🥺','🤠','🤡','🤥','🤫','🤭','🧐','🤓','😈','👿','👋','🤚','🖐','✋','🖖','👌','🤌','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','🤲','🤝','🙏'],
-  'Activities': ['⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🏓','🏸','🥍','🏒','🥅','⛳','🏹','🎣','🤿','🥊','🥋','🎽','🛹','🛼','🛷','⛸','🥌','🎯','🎿','🎳','🏋️','🤸','🤾','🏌️','🏇','🧘','🤺','🏊','🚴','🤼','🤽','🤾','🧗','🏄','🧜','🚣','🧑‍🤝‍🧑','🎠','🎡','🎢','🎪','🎭','🎨','🎰','🎲','🧩','🃏','🀄','🎴','🎹','🥁','🎷','🎺','🎸','🎻','🎤','🎧','📻','🎬','🎮'],
-  'Food': ['🍎','🍊','🍋','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🥬','🥒','🌽','🌶','🫑','🥕','🧄','🧅','🥔','🍠','🥐','🥯','🍞','🥖','🥨','🧀','🥚','🍳','🧈','🥞','🧇','🥓','🥩','🍗','🍖','🦴','🌭','🍔','🍟','🍕','🫓','🌮','🌯','🫔','🥗','🥘','🫕','🥫','🍝','🍜','🍲','🍛','🍣','🍱','🥟','🦪','🍤','🍙','🍚','🍘','🍥','🥮','🍢','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍯','🧃','🥤','🧋','☕','🍵','🍶','🍾','🍷','🍸','🍹','🍺','🍻'],
-  'Travel': ['🚗','🚕','🚙','🚌','🚎','🏎','🚓','🚑','🚒','🚐','🛻','🚚','🚛','🚜','🏍','🛵','🚲','🛴','🛺','🚨','🚔','🚍','🚘','🚖','🚡','🚠','🚟','🚃','🚋','🚞','🚝','🚄','🚅','🚈','🚂','🚆','🚇','🚊','🚉','✈️','🛩','🛫','🛬','🪂','💺','🚁','🚟','⛵','🚤','🛥','🛳','⛴','🚢','⛽','🏗','⚓','🗺','🏔','⛰','🌋','🗻','🏕','🏖','🏜','🏝','🏞','🏟','🏛','🏗','🏘','🏙','🏚','🏠','🏡','🏢','🏣','🏤','🏥','🏦','🏧','🏨','🏩','🏪','🏫','🏬','🏭','🗼','🗽','⛪','🕌','🛕','🕍','⛩','🗾','🎌'],
-  'Objects': ['⌚','📱','💻','🖥','🖨','⌨️','🖱','🖲','💾','💿','📀','📷','📸','📹','🎥','📽','🎞','📞','☎️','📟','📠','📺','📻','🧭','⏱','⏲','⏰','🕰','⌛','📡','🔋','🔌','💡','🔦','🕯','🪔','🗑','🛢','💸','💵','💴','💶','💷','💰','💳','🪙','💎','⚖️','🧰','🔧','🪛','🔩','⚙️','🗜','🔗','⛓','🧲','🔫','💣','🧨','🪓','🔪','🗡','⚔️','🛡','🚪','🪞','🪟','🛏','🛋','🪑','🚽','🚿','🛁','🧴','🧷','🧹','🧺','🧻','🧼','🫧','🔑','🗝','🔐','🔏','🔒','🔓','📦','📫','📪','📬','📭','📮','📯','📜','📃','📄','📑','🧾','📊','📈','📉'],
-  'Symbols': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','☮️','✝️','☪️','🕉','☯️','✡️','🔯','🕎','☦️','⛎','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','⛎','🔀','🔁','🔂','▶️','⏩','⏪','⏫','⏬','◀️','⏮','⏭','🔼','🔽','⏏️','🎦','🔅','🔆','📶','📳','📴','♾','⚠️','🚸','⛔','🚫','🚳','🚭','🚯','🚱','🚷','📵','🔞','💯','🔔','🔕','🎵','🎶','✅','❎','🆗','🆙','🆕','🆓','🆒','🆖','🆚','💠','🔷','🔹','🔶','🔸','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🟤','♠️','♥️','♦️','♣️','🃏','🎴'],
-  'Flags': ['🏁','🚩','🎌','🏴','🏳️','🏳️‍🌈','🏳️‍⚧️','🏴‍☠️','🇺🇸','🇬🇧','🇨🇦','🇦🇺','🇩🇪','🇫🇷','🇯🇵','🇨🇳','🇧🇷','🇮🇳','🇲🇽','🇮🇹','🇪🇸','🇰🇷','🇷🇺','🇸🇦','🇿🇦','🇳🇬','🇦🇷','🇸🇪','🇳🇴','🇩🇰','🇫🇮','🇳🇱','🇧🇪','🇨🇭','🇦🇹','🇵🇱','🇨🇿','🇭🇺','🇬🇷','🇹🇷','🇮🇱','🇦🇪','🇮🇷','🇵🇰','🇧🇩','🇹🇭','🇻🇳','🇵🇭','🇮🇩','🇲🇾']
+  'Smileys': ['😀','😁','😂','🤣','😃','😄','😅','😆','😉','😊','😋','😎','😍','🥰','😘','🙂','🤗','🤩','🤔','😏','😒','😔','😢','😭','🥵','🥶','😱','🤪','😈','👿','👍','👎','👌','✌️','🤞','🤟','🤘','👏','🙌','🙏'],
+  'Activities': ['⚽','🏀','🏈','⚾','🎾','🎱','🃏','🀄','🎴','🎰','🎲','🎯','🎮'],
+  'Food': ['🍔','🍕','🌭','🍿','🍩','🍪','🥃','🍷','🍸','🍹','🍺','🍻','☕'],
+  'Symbols': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💯','🔔','✅','❎','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','♠️','♥️','♦️','♣️','🃏'],
 };
 
 function buildEmojiPicker(targetTextarea) {
   const wrap = document.createElement('div');
   wrap.className = 'emoji-picker-wrap';
-
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-outline btn-sm';
@@ -175,28 +198,8 @@ function buildEmojiPicker(targetTextarea) {
 
   const panel = document.createElement('div');
   panel.className = 'emoji-panel';
-
   const tabs = document.createElement('div');
   tabs.className = 'emoji-tabs';
-  const gridWrap = document.createElement('div');
-  gridWrap.style.padding = '0';
-
-  const catIcons = { 'Smileys':'😀', 'Activities':'⚽', 'Food':'🍔', 'Travel':'✈️', 'Objects':'💡', 'Symbols':'♠️', 'Flags':'🏁' };
-
-  Object.entries(EMOJI_DATA).forEach(([cat, emojis], idx) => {
-    const tab = document.createElement('button');
-    tab.type = 'button';
-    tab.className = 'emoji-tab' + (idx === 0 ? ' active' : '');
-    tab.title = cat;
-    tab.textContent = catIcons[cat] || cat[0];
-    tab.addEventListener('click', () => {
-      tabs.querySelectorAll('.emoji-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      renderGrid(emojis);
-    });
-    tabs.appendChild(tab);
-  });
-
   const grid = document.createElement('div');
   grid.className = 'emoji-grid';
 
@@ -218,102 +221,54 @@ function buildEmojiPicker(targetTextarea) {
       grid.appendChild(b);
     });
   }
-
+  const catIcons = { 'Smileys':'😀', 'Activities':'⚽', 'Food':'🍔', 'Symbols':'♠️' };
+  Object.entries(EMOJI_DATA).forEach(([cat, emojis], idx) => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = 'emoji-tab' + (idx === 0 ? ' active' : '');
+    tab.textContent = catIcons[cat] || cat[0];
+    tab.addEventListener('click', () => {
+      tabs.querySelectorAll('.emoji-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      renderGrid(emojis);
+    });
+    tabs.appendChild(tab);
+  });
   renderGrid(EMOJI_DATA['Smileys']);
-  gridWrap.appendChild(grid);
-
   panel.appendChild(tabs);
-  panel.appendChild(gridWrap);
+  panel.appendChild(grid);
   wrap.appendChild(panel);
-
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    panel.classList.toggle('show');
-  });
-
-  document.addEventListener('click', (e) => {
-    if (!wrap.contains(e.target)) panel.classList.remove('show');
-  });
-
+  btn.addEventListener('click', (e) => { e.stopPropagation(); panel.classList.toggle('show'); });
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) panel.classList.remove('show'); });
   return wrap;
 }
 
-// ==================== RICH TEXT TOOLBAR ====================
 function buildToolbar(textarea) {
   const toolbar = document.createElement('div');
   toolbar.className = 'toolbar';
-
   const tools = [
-    { label: 'B', title: 'Bold', tag: '**', style: 'font-weight:700' },
-    { label: 'I', title: 'Italic', tag: '*', style: 'font-style:italic' },
-    { label: 'U', title: 'Underline', tag: '__', style: 'text-decoration:underline' },
-    { label: 'S', title: 'Strikethrough', tag: '~~', style: 'text-decoration:line-through' },
-    null,
-    { label: '`', title: 'Code', tag: '`', style: 'font-family:monospace' },
-    { label: '```', title: 'Code Block', multiline: true },
-    null,
-    { label: '🔗', title: 'Link', link: true },
-    null,
-    { label: '• List', title: 'Unordered List', listType: 'ul' },
-    { label: '1. List', title: 'Ordered List', listType: 'ol' },
-    { label: '❝', title: 'Quote', quote: true },
+    { label: 'B', tag: '**', style: 'font-weight:700' },
+    { label: 'I', tag: '*', style: 'font-style:italic' },
+    { label: 'U', tag: '__', style: 'text-decoration:underline' },
+    { label: 'S', tag: '~~', style: 'text-decoration:line-through' },
+    { label: '`', tag: '`', style: 'font-family:monospace' },
   ];
-
   tools.forEach(t => {
-    if (!t) {
-      const sep = document.createElement('div');
-      sep.className = 'toolbar-sep';
-      toolbar.appendChild(sep);
-      return;
-    }
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'toolbar-btn';
-    btn.title = t.title;
     btn.innerHTML = `<span style="${t.style || ''}">${t.label}</span>`;
-
     btn.addEventListener('click', () => {
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const selected = textarea.value.slice(start, end);
-      let newText = '';
-      let cursorOffset = 0;
-
-      if (t.multiline) {
-        newText = '```\n' + (selected || 'code here') + '\n```';
-        cursorOffset = selected ? newText.length : 4;
-      } else if (t.link) {
-        const url = prompt('Enter URL:', 'https://');
-        if (!url) return;
-        newText = `[${selected || 'link text'}](${url})`;
-        cursorOffset = newText.length;
-      } else if (t.listType === 'ul') {
-        const lines = (selected || 'item').split('\n');
-        newText = lines.map(l => `- ${l}`).join('\n');
-        cursorOffset = newText.length;
-      } else if (t.listType === 'ol') {
-        const lines = (selected || 'item').split('\n');
-        newText = lines.map((l, i) => `${i + 1}. ${l}`).join('\n');
-        cursorOffset = newText.length;
-      } else if (t.quote) {
-        const lines = (selected || 'quote').split('\n');
-        newText = lines.map(l => `> ${l}`).join('\n');
-        cursorOffset = newText.length;
-      } else {
-        newText = `${t.tag}${selected || t.title.toLowerCase()}${t.tag}`;
-        cursorOffset = selected ? newText.length : t.tag.length;
-      }
-
+      const newText = `${t.tag}${selected || 'text'}${t.tag}`;
       textarea.value = textarea.value.slice(0, start) + newText + textarea.value.slice(end);
-      textarea.selectionStart = start + (selected ? cursorOffset : cursorOffset);
-      textarea.selectionEnd = start + (selected ? cursorOffset : cursorOffset);
       textarea.focus();
       textarea.dispatchEvent(new Event('input'));
     });
-
     toolbar.appendChild(btn);
   });
-
   return toolbar;
 }
 
@@ -332,10 +287,9 @@ function formatScheduledTime(ts) {
   return ctDateStr(d);
 }
 
-function renderQueueCard(job, container, editCallback) {
+function renderQueueCard(job, container) {
   const type = job.type || 'message';
   const meta = TYPE_LABELS[type] || TYPE_LABELS.message;
-
   const card = document.createElement('div');
   card.className = 'queue-card unified-queue-card';
   card.style.borderLeftColor = meta.color;
@@ -357,11 +311,8 @@ function renderQueueCard(job, container, editCallback) {
   const preview = document.createElement('div');
   preview.className = 'queue-card-preview';
   let previewText = '';
-  if (job.type === 'poll' && job.pollData) {
-    previewText = job.pollData.title || 'Poll';
-  } else {
-    previewText = (job.content || '').replace(/\n/g, ' ').slice(0, 100);
-  }
+  if (job.type === 'poll' && job.pollData) previewText = job.pollData.title || 'Poll';
+  else previewText = (job.content || '').replace(/\n/g, ' ').slice(0, 100);
   preview.textContent = previewText;
 
   const delBtn = document.createElement('button');
@@ -381,11 +332,6 @@ function renderQueueCard(job, container, editCallback) {
   card.appendChild(channelEl);
   card.appendChild(preview);
   card.appendChild(delBtn);
-
-  if (editCallback) {
-    card.addEventListener('click', () => editCallback(job));
-  }
-
   container.appendChild(card);
 }
 
@@ -408,11 +354,53 @@ function subscribeToUnifiedQueue() {
       countBadge.textContent = `${snap.size} item${snap.size !== 1 ? 's' : ''}`;
       countBadge.style.display = 'inline-flex';
     }
-    snap.forEach(d => renderQueueCard({ id: d.id, ...d.data() }, container, null));
+    snap.forEach(d => renderQueueCard({ id: d.id, ...d.data() }, container));
   });
 }
 
-// ==================== COLUMN 1: BROADCAST ====================
+// ==================== ACTIVITY LOG (bottom panel) ====================
+const LOG_EMOJI = {
+  sent: '📤', scheduled: '📅', error: '🔴', warning: '🟡', success: '✅',
+  connection: '🔌', reply: '💬', vote_open: '🗳️', vote_closed: '🏁',
+  image_generated: '🎨', imgur_uploaded: '📸', approval_pending: '⏳',
+  approved: '👍', declined: '👎'
+};
+
+function subscribeToActivityLog() {
+  const list = document.getElementById('activity-log-list');
+  const badge = document.getElementById('activity-count-badge');
+  const q = query(collection(db, 'logs'), orderBy('timestamp', 'desc'), limit(100));
+  return onSnapshot(q, (snap) => {
+    list.innerHTML = '';
+    if (snap.empty) {
+      list.innerHTML = '<div class="queue-empty">No activity yet.</div>';
+      if (badge) badge.textContent = '0 entries';
+      return;
+    }
+    if (badge) badge.textContent = `${snap.size} entr${snap.size !== 1 ? 'ies' : 'y'}`;
+    snap.forEach(d => {
+      const log = d.data();
+      const row = document.createElement('div');
+      row.className = `activity-log-row lt-${log.type || 'connection'}`;
+      const emoji = document.createElement('div');
+      emoji.className = 'activity-log-emoji';
+      emoji.textContent = LOG_EMOJI[log.type] || 'ℹ️';
+      const msg = document.createElement('div');
+      msg.className = 'activity-log-msg';
+      msg.textContent = log.message || '';
+      const time = document.createElement('div');
+      time.className = 'activity-log-time';
+      const ts = log.timestamp?.toDate?.();
+      time.textContent = ts ? ctDateStr(ts) : '...';
+      row.appendChild(emoji);
+      row.appendChild(msg);
+      row.appendChild(time);
+      list.appendChild(row);
+    });
+  });
+}
+
+// ==================== BROADCAST PANEL ====================
 (function initBroadcast() {
   const textarea = document.getElementById('msg-textarea');
   const previewContent = document.getElementById('msg-preview-content');
@@ -429,23 +417,16 @@ function subscribeToUnifiedQueue() {
     previewContent.innerHTML = renderDiscordMarkdown(textarea.value);
   });
 
-  let editingJobId = null;
-
   async function sendMessage(channelId, channelName, content, clear = true) {
     if (!content.trim()) { alert('Message cannot be empty.'); return; }
     if (!channelId) { alert('Please select a channel.'); return; }
-    const job = {
-      type: 'message',
-      channelId, channelName: channelName || channelId,
-      content,
-      scheduledFor: Timestamp.now(),
-      status: 'pending',
-      createdAt: serverTimestamp(),
-      sentAt: null, error: null
-    };
-    await addDoc(collection(db, 'scheduled_jobs'), job);
-    await writeLog('sent', `Message queued for immediate send to #${channelName}`, { channelId, preview: content.slice(0, 80) });
-    if (clear) { textarea.value = ''; previewContent.innerHTML = ''; editingJobId = null; }
+    await addDoc(collection(db, 'scheduled_jobs'), {
+      type: 'message', channelId, channelName: channelName || channelId, content,
+      scheduledFor: Timestamp.now(), status: 'pending',
+      createdAt: serverTimestamp(), sentAt: null, error: null
+    });
+    await writeLog('sent', `Message queued for #${channelName}`, { channelId });
+    if (clear) { textarea.value = ''; previewContent.innerHTML = ''; }
   }
 
   async function scheduleMessage(channelId, channelName, content, dtLocal) {
@@ -454,68 +435,60 @@ function subscribeToUnifiedQueue() {
     if (!dtLocal) { alert('Please select a date and time.'); return; }
     const scheduledDate = localDatetimeToUTC(dtLocal);
     if (scheduledDate <= new Date()) { alert('Scheduled time must be in the future.'); return; }
-    const job = {
-      type: 'message',
-      channelId, channelName: channelName || channelId,
-      content,
-      scheduledFor: Timestamp.fromDate(scheduledDate),
-      status: 'pending',
-      createdAt: serverTimestamp(),
-      sentAt: null, error: null
-    };
-    await addDoc(collection(db, 'scheduled_jobs'), job);
+    await addDoc(collection(db, 'scheduled_jobs'), {
+      type: 'message', channelId, channelName: channelName || channelId, content,
+      scheduledFor: Timestamp.fromDate(scheduledDate), status: 'pending',
+      createdAt: serverTimestamp(), sentAt: null, error: null
+    });
     await writeLog('scheduled', `Message scheduled for ${ctDateStr(scheduledDate)} in #${channelName}`, { channelId });
     textarea.value = ''; previewContent.innerHTML = '';
     schedPicker.classList.remove('show');
-    editingJobId = null;
     alert(`Message scheduled for ${ctDateStr(scheduledDate)} CT`);
   }
 
   document.getElementById('msg-btn-test').addEventListener('click', async () => {
-    if (!settings.testChannelId) { alert('No test channel configured. Go to Settings.'); return; }
+    if (!settings.testChannelId) { alert('No test channel configured.'); return; }
     await sendMessage(settings.testChannelId, settings.testChannelName, textarea.value, false);
-    await writeLog('sent', `Test message sent to #${settings.testChannelName}`, {});
   });
-
   document.getElementById('msg-btn-send').addEventListener('click', async () => {
     const opt = channelSel.options[channelSel.selectedIndex];
     await sendMessage(channelSel.value, opt ? opt.textContent.replace('#','') : '', textarea.value);
   });
-
   document.getElementById('msg-btn-schedule').addEventListener('click', () => {
     schedPicker.classList.toggle('show');
   });
-
   document.getElementById('msg-btn-confirm-schedule').addEventListener('click', async () => {
     const opt = channelSel.options[channelSel.selectedIndex];
     await scheduleMessage(channelSel.value, opt ? opt.textContent.replace('#','') : '', textarea.value, schedDatetime.value);
   });
-
-  function loadJobIntoEditor(job) {
-    textarea.value = job.content || '';
-    previewContent.innerHTML = renderDiscordMarkdown(job.content || '');
-    editingJobId = job.id;
-    if (job.channelId) channelSel.value = job.channelId;
-    textarea.scrollIntoView({ behavior: 'smooth' });
-  }
-
 })();
 
-// ==================== COLUMN 2: POLL GENERATOR ====================
-(function initPollGenerator() {
-  const monthSel = document.getElementById('poll-month');
-  const yearSel = document.getElementById('poll-year');
-  const genBtn = document.getElementById('poll-gen-btn');
-  const previewArea = document.getElementById('poll-preview');
-  const previewWrap = document.getElementById('poll-preview-wrap');
-  const schedPicker = document.getElementById('poll-schedule-picker');
-  const schedDatetime = document.getElementById('poll-schedule-datetime');
+// ==================== POKER NIGHT WORKFLOW ====================
+(function initPokerNight() {
+  const monthSel = document.getElementById('pn-month');
+  const yearSel = document.getElementById('pn-year');
+  const voteDt = document.getElementById('pn-vote-datetime');
+  const voteChannel = document.getElementById('pn-vote-channel');
+  const previewWrap = document.getElementById('pn-poll-preview-wrap');
+  const genBtn = document.getElementById('pn-gen-poll-btn');
+  const schedBtn = document.getElementById('pn-schedule-vote-btn');
+  const stepperEls = document.querySelectorAll('.pn-step');
+  const statusPill = document.getElementById('pn-status-pill');
+  const editWrap = document.getElementById('pn-edit-mode-wrap');
+  const editText = document.getElementById('pn-edit-text');
+  const editImage = document.getElementById('pn-edit-image');
+  const editImagePreview = document.getElementById('pn-edit-image-preview');
+  const editFirstHand = document.getElementById('pn-edit-firsthand');
+  const editChannel = document.getElementById('pn-edit-channel');
+  const editRemChannel = document.getElementById('pn-edit-rem-channel');
+  const resubmitBtn = document.getElementById('pn-resubmit-btn');
+  const cancelEditBtn = document.getElementById('pn-cancel-edit-btn');
+  const wfList = document.getElementById('pn-workflows-list');
 
-  // Default to next month
+  // Default month/year
   const now = new Date();
   const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   monthSel.value = String(nextMonth.getMonth() + 1).padStart(2, '0');
-
   const curYear = now.getFullYear();
   yearSel.innerHTML = '';
   [curYear, curYear + 1].forEach(y => {
@@ -524,6 +497,13 @@ function subscribeToUnifiedQueue() {
     if (y === nextMonth.getFullYear()) opt.selected = true;
     yearSel.appendChild(opt);
   });
+
+  // Default vote datetime: today at 6PM CT
+  (function setDefault() {
+    const d = new Date();
+    d.setHours(18, 0, 0, 0);
+    voteDt.value = dateToLocalDatetimeStr(d);
+  })();
 
   function getThursdaysInMonth(year, month) {
     const thursdays = [];
@@ -537,18 +517,23 @@ function subscribeToUnifiedQueue() {
 
   let pollData = null;
 
-  genBtn.addEventListener('click', async () => {
+  function setStep(stepName) {
+    const order = ['vote','watch','generate','approve','schedule'];
+    const idx = order.indexOf(stepName);
+    stepperEls.forEach((el, i) => {
+      el.classList.remove('active','done');
+      if (i < idx) el.classList.add('done');
+      else if (i === idx) el.classList.add('active');
+    });
+  }
+
+  async function generatePoll() {
     const month = parseInt(monthSel.value);
     const year = parseInt(yearSel.value);
-    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     const thursdays = getThursdaysInMonth(year, month);
+    if (!settings.openrouterKey) { alert('OpenRouter API key not configured.'); return; }
 
-    if (!settings.openrouterKey) {
-      alert('OpenRouter API key not configured. Go to Settings.');
-      return;
-    }
-
-    previewWrap.innerHTML = '<div class="poll-generating"><div class="spinner"></div>Generating poll with AI...</div>';
+    previewWrap.innerHTML = '<div class="poll-generating"><div class="spinner"></div>Generating vote with AI...</div>';
     previewWrap.classList.add('show');
 
     const thursdayList = thursdays.map(d => {
@@ -557,26 +542,17 @@ function subscribeToUnifiedQueue() {
       return `${mm}/${dd}`;
     }).join(', ');
 
-    const prompt = `Generate a Discord poker night vote poll for ${monthNames[month-1]} ${year}.
+    const gameTime = (settings.pokerNightDefaults && settings.pokerNightDefaults.firstHandTime) || '7:30 PM CT';
+    const prompt = `Generate a Discord poker night vote poll for ${MONTH_NAMES[month-1]} ${year}.
 
-The poll is for the Shadow Spade Lounge poker group. They meet on Thursdays at 7:30 PM CT.
+The poll is for the Shadow Spade Lounge poker group. They meet on Thursdays at ${gameTime}.
 
-Thursdays in ${monthNames[month-1]} ${year}: ${thursdayList}
+Thursdays in ${MONTH_NAMES[month-1]} ${year}: ${thursdayList}
 
-Return ONLY a JSON object with this exact structure:
-{
-  "title": "[emoji] ${monthNames[month-1]} ${year} Monthly Poker Night Vote [emoji]",
-  "options": [
-    { "emoji": "🃏", "label": "Thurs (MM/DD) @ 7:30 PM CT", "holidayNote": "" }
-  ]
-}
+Return ONLY a JSON object:
+{"title":"[emoji] ${MONTH_NAMES[month-1]} ${year} Monthly Poker Night Vote [emoji]","options":[{"emoji":"🃏","label":"Thurs (MM/DD) @ ${gameTime}","holidayNote":""}]}
 
-Rules:
-- Title should have a month-thematic emoji on EACH side (e.g. 🎃 for October, 🦃 for November, ❄️ for December, 🌸 for April, etc.)
-- Each option must follow format: "Thurs (MM/DD) @ 7:30 PM CT"
-- Each option gets a relevant emoji. Consider nearby national/fun holidays for that Thursday. If a Thursday falls on or near a holiday, note it in holidayNote.
-- Provide one option per Thursday in the month
-- Return ONLY valid JSON, no other text`;
+Rules: month-thematic emojis on each side of title, one option per Thursday with its own emoji, holiday-aware. Return ONLY valid JSON.`;
 
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -588,42 +564,29 @@ Rules:
           'X-Title': 'Pitboss - Shadow Spade Lounge'
         },
         body: JSON.stringify({
-          model: settings.openrouterModel || 'google/gemini-2.0-flash-lite',
+          model: settings.openrouterModel || 'google/gemini-2.0-flash-lite-001',
           messages: [{ role: 'user', content: prompt }]
         })
       });
-
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => '');
-        throw new Error(`OpenRouter HTTP ${res.status}: ${errBody.slice(0, 200)}`);
-      }
-
+      if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}`);
       const data = await res.json();
       let content = data.choices?.[0]?.message?.content?.trim();
-      if (!content) throw new Error('OpenRouter returned an empty response.');
-
-      // Strip markdown code fences if present
       content = content.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
-      // Extract JSON object if there's surrounding text
       const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('No JSON object found in model response.');
-
+      if (!jsonMatch) throw new Error('No JSON in response');
       const parsed = JSON.parse(jsonMatch[0]);
-      if (!parsed.title || !Array.isArray(parsed.options)) throw new Error('Unexpected JSON structure from model.');
-
       pollData = parsed;
       renderPollPreview(parsed);
-      await addDoc(collection(db, 'logs'), { type: 'success', message: `Poll generated for ${monthNames[month-1]} ${year} (${parsed.options.length} options).`, timestamp: serverTimestamp(), metadata: {} });
+      await writeLog('success', `Vote poll generated for ${MONTH_NAMES[month-1]} ${year}.`, {});
     } catch (err) {
-      previewWrap.innerHTML = `<div style="color:var(--red-text);padding:16px;font-size:13px;"><strong>Poll generation failed</strong><br><br>${err.message}</div>`;
-      await addDoc(collection(db, 'logs'), { type: 'error', message: `Poll generation failed: ${err.message}`, timestamp: serverTimestamp(), metadata: {} });
+      previewWrap.innerHTML = `<div style="color:var(--red-text);padding:12px;font-size:13px;">Vote generation failed: ${err.message}</div>`;
+      await writeLog('error', `Vote generation failed: ${err.message}`, {});
     }
-  });
+  }
 
   function renderPollPreview(data) {
     previewWrap.innerHTML = '';
     previewWrap.classList.add('show');
-
     const titleInput = document.createElement('input');
     titleInput.className = 'poll-title-edit';
     titleInput.value = data.title;
@@ -633,435 +596,336 @@ Rules:
     data.options.forEach((opt, idx) => {
       const row = document.createElement('div');
       row.className = 'poll-option-item';
-
       const emojiSpan = document.createElement('span');
       emojiSpan.style.fontSize = '18px';
       emojiSpan.contentEditable = true;
-      emojiSpan.style.cursor = 'text';
       emojiSpan.textContent = opt.emoji;
       emojiSpan.addEventListener('input', () => { pollData.options[idx].emoji = emojiSpan.textContent; });
-
       const labelInput = document.createElement('input');
       labelInput.value = opt.label + (opt.holidayNote ? ` — ${opt.holidayNote}` : '');
       labelInput.addEventListener('input', () => { pollData.options[idx].label = labelInput.value; });
-
       row.appendChild(emojiSpan);
       row.appendChild(labelInput);
       previewWrap.appendChild(row);
     });
-
     const meta = document.createElement('div');
     meta.className = 'poll-meta';
-    meta.textContent = '✅ Multiple answers allowed  •  ⏱ 7-day duration';
+    meta.textContent = '✅ Multi-select  •  ⏱ Auto-closes when month-list exhausted (default 7-day duration)';
     previewWrap.appendChild(meta);
   }
 
-  function getCurrentPollData() {
-    return pollData;
-  }
+  async function scheduleVoteAndWorkflow() {
+    if (!pollData) { alert('Generate the vote first.'); return; }
+    if (!voteDt.value) { alert('Pick a vote send time.'); return; }
+    if (!voteChannel.value) { alert('Pick a vote channel.'); return; }
+    const scheduledDate = localDatetimeToUTC(voteDt.value);
+    const month = parseInt(monthSel.value);
+    const year = parseInt(yearSel.value);
+    const opt = voteChannel.options[voteChannel.selectedIndex];
+    const channelName = opt ? opt.textContent.replace('#','') : '';
 
-  async function submitPoll(channelId, channelName, immediate, dtLocal) {
-    const pd = getCurrentPollData();
-    if (!pd) { alert('Please generate a poll first.'); return; }
-    if (!channelId) { alert('Please select a channel.'); return; }
-
-    let scheduledFor;
-    if (immediate) {
-      scheduledFor = Timestamp.now();
-    } else {
-      if (!dtLocal) { alert('Please select a date and time.'); return; }
-      const d = localDatetimeToUTC(dtLocal);
-      if (d <= new Date()) { alert('Scheduled time must be in the future.'); return; }
-      scheduledFor = Timestamp.fromDate(d);
-    }
-
-    const job = {
+    // 1. Create scheduled poll job (existing 'poll' type — backward compatible)
+    const pollDuration = 168; // 7 days default
+    const pollJobRef = await addDoc(collection(db, 'scheduled_jobs'), {
       type: 'poll',
-      channelId, channelName: channelName || channelId,
-      content: pd.title,
+      channelId: voteChannel.value, channelName,
+      content: pollData.title,
       pollData: {
-        title: pd.title,
-        options: pd.options.map(o => ({ emoji: o.emoji, text: o.label })),
+        title: pollData.title,
+        options: pollData.options.map(o => ({ emoji: o.emoji, text: o.label })),
         multiSelect: true,
-        duration: 7 * 24 // hours
+        duration: pollDuration
       },
-      scheduledFor,
+      scheduledFor: Timestamp.fromDate(scheduledDate),
       status: 'pending',
       createdAt: serverTimestamp(),
-      sentAt: null, error: null
-    };
+      sentAt: null, error: null,
+      // workflow link
+      workflowId: null  // patched below
+    });
 
-    await addDoc(collection(db, 'scheduled_jobs'), job);
-    const action = immediate ? 'queued for immediate send' : `scheduled for ${ctDateStr(scheduledFor.toDate())}`;
-    await writeLog(immediate ? 'sent' : 'scheduled', `Poll "${pd.title}" ${action} to #${channelName}`, { channelId });
+    // 2. Create vote_workflows doc
+    const wfRef = await addDoc(collection(db, 'vote_workflows'), {
+      status: 'scheduled', // → 'awaiting_results' after poll sends → 'generating' → 'approval_pending' → 'approved'/'declined'/'edit_mode'
+      pollJobId: pollJobRef.id,
+      pollMessageId: null, // bot writes after sending
+      pollChannelId: voteChannel.value,
+      pollChannelName: channelName,
+      pollDurationHours: pollDuration,
+      month, year,
+      pollScheduledFor: Timestamp.fromDate(scheduledDate),
+      pollClosesAt: Timestamp.fromDate(new Date(scheduledDate.getTime() + pollDuration * 3600 * 1000)),
+      gameTime: (settings.pokerNightDefaults && settings.pokerNightDefaults.firstHandTime) || '7:30 PM CT',
+      tableOpenTime: (settings.pokerNightDefaults && settings.pokerNightDefaults.tableOpenTime) || '7:00 PM CT',
+      reminderOffsets: (settings.pokerNightDefaults && settings.pokerNightDefaults.reminderOffsetsMinutes) || [1440, 240, 30], // 24h, 4h, 30m
+      announceChannelId: settings.lastChannels?.['pn-edit-channel'] || (findChannelByName('announcements')?.id || voteChannel.value),
+      announceChannelName: (findChannelByName('announcements')?.name || channelName),
+      reminderChannelId: settings.lastChannels?.['pn-edit-rem-channel'] || (findChannelByName('riff-room')?.id || voteChannel.value),
+      reminderChannelName: (findChannelByName('riff-room')?.name || channelName),
+      approvalChannelId: settings.approvalChannelId || (findChannelByName('clanker')?.id || ''),
+      generatedAnnouncementText: null,
+      generatedImageUrl: null,
+      winningWeekday: null,
+      computedFirstHandUtc: null,
+      createdAt: serverTimestamp()
+    });
 
-    if (!immediate) {
-      schedPicker.classList.remove('show');
-      alert(`Poll scheduled for ${ctDateStr(scheduledFor.toDate())} CT`);
-    }
+    // patch poll job with workflow id
+    await updateDoc(pollJobRef, { workflowId: wfRef.id });
+
+    await writeLog('vote_open', `Poker Night vote scheduled for ${ctDateStr(scheduledDate)} in #${channelName}. Workflow ${wfRef.id.slice(0,6)} created.`, { workflowId: wfRef.id });
+    alert(`✅ Vote scheduled. Workflow created. The bot will watch for the result and post an approval card in #${(findChannelByName('clanker')?.name || 'clanker')} when ready.`);
     pollData = null;
     previewWrap.innerHTML = '';
     previewWrap.classList.remove('show');
   }
 
-  document.getElementById('poll-btn-test').addEventListener('click', async () => {
-    if (!settings.testChannelId) { alert('No test channel configured.'); return; }
-    await submitPoll(settings.testChannelId, settings.testChannelName, true);
-  });
+  genBtn.addEventListener('click', generatePoll);
+  schedBtn.addEventListener('click', scheduleVoteAndWorkflow);
 
-  document.getElementById('poll-btn-send').addEventListener('click', async () => {
-    const channelSel = document.getElementById('poll-channel');
-    const opt = channelSel.options[channelSel.selectedIndex];
-    await submitPoll(channelSel.value, opt ? opt.textContent.replace('#','') : '', true);
-  });
+  // ====== Workflow listing & edit-mode handling ======
+  let editingWfId = null;
 
-  document.getElementById('poll-btn-schedule').addEventListener('click', () => {
-    schedPicker.classList.toggle('show');
-  });
-
-  document.getElementById('poll-btn-confirm-schedule').addEventListener('click', async () => {
-    const channelSel = document.getElementById('poll-channel');
-    const opt = channelSel.options[channelSel.selectedIndex];
-    await submitPoll(channelSel.value, opt ? opt.textContent.replace('#','') : '', false, schedDatetime.value);
-  });
-
-})();
-
-// ==================== COLUMN 3: ANNOUNCEMENT ====================
-(function initAnnouncement() {
-  const pokerDateInput = document.getElementById('poker-date');
-  const channelSel = document.getElementById('announce-channel');
-  const imageUrlInput = document.getElementById('announce-image-url');
-  const genBtn = document.getElementById('announce-gen-btn');
-  const previewWrap = document.getElementById('announce-preview-wrap');
-  const previewText = document.getElementById('announce-preview-text');
-  const schedPicker = document.getElementById('announce-schedule-picker');
-  const schedDatetime = document.getElementById('announce-schedule-datetime');
-
-  function buildAnnouncementText(pokerDate) {
-    const monthNumFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', month: 'numeric' });
-    const ctMonth = parseInt(monthNumFmt.format(pokerDate));
-
-    const [emoji1, emoji2] = MONTH_EMOJIS[ctMonth] || ['🃏', '♠️'];
-    const memoList = MEMO_WORDS[ctMonth] || ['payup'];
-    const memo = memoList[Math.floor(Math.random() * memoList.length)];
-    const monthNameFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', month: 'long' });
-    const yearFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric' });
-    const monthName = monthNameFmt.format(pokerDate);
-    const year = yearFmt.format(pokerDate);
-    const weekdayFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', weekday: 'long' });
-    const shortDateFmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Chicago', month: 'numeric', day: 'numeric', year: 'numeric'
-    });
-    const weekday = weekdayFmt.format(pokerDate);
-    const shortDate = shortDateFmt.format(pokerDate);
-
-    return `${emoji1}   ${monthName} ${year} Round Poker Night  ${emoji2}
-
-🗓️ Date: ${weekday}, ${shortDate}
-⏰ Time: 7:30 PM CT
-🎮 Platform: PokerNow (link drops in #join-the-game ~7 PM)
-💰 Buy-in: $20 minimum via Venmo/CashApp
-🤑  Blinds: 10/20
-📩 Deposit Memo: ${memo}
-
-@everyone
-
-👇🏼  ✅  or ❌  below if you think you'll stop by! 👇🏼`;
+  function showEditMode(wf) {
+    editingWfId = wf.id;
+    editWrap.style.display = 'block';
+    editText.value = wf.generatedAnnouncementText || '';
+    editImage.value = wf.generatedImageUrl || '';
+    updateImagePreview();
+    if (wf.computedFirstHandUtc) {
+      const d = wf.computedFirstHandUtc.toDate ? wf.computedFirstHandUtc.toDate() : new Date(wf.computedFirstHandUtc);
+      editFirstHand.value = dateToLocalDatetimeStr(d);
+    }
+    if (wf.announceChannelId) editChannel.value = wf.announceChannelId;
+    if (wf.reminderChannelId) editRemChannel.value = wf.reminderChannelId;
+    editWrap.scrollIntoView({ behavior: 'smooth' });
+    setStep('approve');
+    statusPill.textContent = 'Edit Mode';
+    statusPill.className = 'pn-status-pill pill-edit';
   }
 
-  genBtn.addEventListener('click', () => {
-    const val = pokerDateInput.value;
-    if (!val) { alert('Please enter the poker night date first.'); return; }
-    const pokerDate = localDatetimeToUTC(val);
-    previewText.value = buildAnnouncementText(pokerDate);
-    previewWrap.style.display = 'block';
-  });
+  function hideEditMode() {
+    editingWfId = null;
+    editWrap.style.display = 'none';
+  }
 
-  async function submitAnnouncement(channelId, channelName, immediate, dtLocal) {
-    const content = previewText.value.trim();
-    if (!content) { alert('Announcement content is empty.'); return; }
-    if (!channelId) { alert('Please select a channel.'); return; }
+  function updateImagePreview() {
+    const url = editImage.value.trim();
+    editImagePreview.innerHTML = url ? `<img src="${url}" alt="preview" />` : '';
+  }
+  editImage.addEventListener('input', updateImagePreview);
+  cancelEditBtn.addEventListener('click', hideEditMode);
 
-    let scheduledFor;
-    if (immediate) {
-      scheduledFor = Timestamp.now();
-    } else {
-      if (!dtLocal) { alert('Please select a date and time.'); return; }
-      const d = localDatetimeToUTC(dtLocal);
-      if (d <= new Date()) { alert('Scheduled time must be in the future.'); return; }
-      scheduledFor = Timestamp.fromDate(d);
-    }
+  resubmitBtn.addEventListener('click', async () => {
+    if (!editingWfId) return;
+    if (!editText.value.trim()) { alert('Announcement text empty.'); return; }
+    if (!editFirstHand.value) { alert('Set first-hand time.'); return; }
+    if (!editChannel.value) { alert('Pick announce channel.'); return; }
+    if (!editRemChannel.value) { alert('Pick reminders channel.'); return; }
 
-    const imageUrl = imageUrlInput.value.trim() || null;
+    const firstHandDate = localDatetimeToUTC(editFirstHand.value);
+    const announceOpt = editChannel.options[editChannel.selectedIndex];
+    const remOpt = editRemChannel.options[editRemChannel.selectedIndex];
+    const announceName = announceOpt ? announceOpt.textContent.replace('#','') : '';
+    const remName = remOpt ? remOpt.textContent.replace('#','') : '';
 
-    const job = {
+    // Update workflow doc to approved + edited content
+    await updateDoc(doc(db, 'vote_workflows', editingWfId), {
+      status: 'approved',
+      generatedAnnouncementText: editText.value,
+      generatedImageUrl: editImage.value.trim() || null,
+      computedFirstHandUtc: Timestamp.fromDate(firstHandDate),
+      announceChannelId: editChannel.value,
+      announceChannelName: announceName,
+      reminderChannelId: editRemChannel.value,
+      reminderChannelName: remName,
+      approvedAt: serverTimestamp(),
+      approvedSource: 'dashboard_edit'
+    });
+
+    // Schedule announcement + reminders directly from the dashboard.
+    // (The bot also schedules these on Approve interaction; both paths land at
+    // the same job docs by checking workflow status before bot-side enqueue.)
+    const offsetsMin = (settings.pokerNightDefaults && settings.pokerNightDefaults.reminderOffsetsMinutes) || [1440, 240, 30];
+    const announcementJob = {
       type: 'announcement',
-      channelId, channelName: channelName || channelId,
-      content,
-      imageUrl,
-      scheduledFor,
+      channelId: editChannel.value,
+      channelName: announceName,
+      content: editText.value,
+      imageUrl: editImage.value.trim() || null,
+      scheduledFor: Timestamp.fromDate(new Date(firstHandDate.getTime() - 6 * 24 * 3600 * 1000)), // ~6 days before by default
       status: 'pending',
       createdAt: serverTimestamp(),
+      workflowId: editingWfId,
       sentAt: null, error: null
     };
+    // Actually schedule announcement to send immediately (now) — Parker is approving live
+    announcementJob.scheduledFor = Timestamp.now();
+    await addDoc(collection(db, 'scheduled_jobs'), announcementJob);
 
-    await addDoc(collection(db, 'scheduled_jobs'), job);
-    const action = immediate ? 'queued for immediate send' : `scheduled for ${ctDateStr(scheduledFor.toDate())}`;
-    await writeLog(immediate ? 'sent' : 'scheduled', `Announcement ${action} to #${channelName}`, { channelId });
-
-    if (!immediate) {
-      schedPicker.classList.remove('show');
-      alert(`Announcement scheduled for ${ctDateStr(scheduledFor.toDate())} CT`);
+    // Schedule 3 reminders relative to first-hand
+    const reminderTexts = await generateReminderTexts(firstHandDate);
+    for (let i = 0; i < offsetsMin.length; i++) {
+      const offsetMs = offsetsMin[i] * 60 * 1000;
+      const remTime = new Date(firstHandDate.getTime() - offsetMs);
+      if (remTime <= new Date()) continue; // skip past reminders
+      await addDoc(collection(db, 'scheduled_jobs'), {
+        type: 'reminder',
+        channelId: editRemChannel.value,
+        channelName: remName,
+        content: reminderTexts[i] || `Reminder: poker is coming up at ${ctTimeShort(firstHandDate)} CT.`,
+        scheduledFor: Timestamp.fromDate(remTime),
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        workflowId: editingWfId,
+        sentAt: null, error: null
+      });
     }
-  }
 
-  document.getElementById('announce-btn-test').addEventListener('click', async () => {
-    if (!settings.testChannelId) { alert('No test channel configured. Go to Settings.'); return; }
-    await submitAnnouncement(settings.testChannelId, settings.testChannelName, true);
+    await writeLog('approved', `Workflow ${editingWfId.slice(0,6)} approved via dashboard. Announcement + reminders scheduled.`, { workflowId: editingWfId });
+    alert('✅ Approved. Announcement queued for immediate send and reminders scheduled.');
+    hideEditMode();
+    statusPill.textContent = 'Approved';
+    statusPill.className = 'pn-status-pill pill-approved';
   });
 
-  document.getElementById('announce-btn-send').addEventListener('click', async () => {
-    const opt = channelSel.options[channelSel.selectedIndex];
-    await submitAnnouncement(channelSel.value, opt ? opt.textContent.replace('#','') : '', true);
-  });
-
-  document.getElementById('announce-btn-schedule').addEventListener('click', () => {
-    schedPicker.classList.toggle('show');
-  });
-
-  document.getElementById('announce-btn-confirm-schedule').addEventListener('click', async () => {
-    const opt = channelSel.options[channelSel.selectedIndex];
-    await submitAnnouncement(channelSel.value, opt ? opt.textContent.replace('#','') : '', false, schedDatetime.value);
-  });
-})();
-
-// ==================== COLUMN 3: REMINDERS ====================
-(function initReminders() {
-  const pokerDateInput = document.getElementById('poker-date');
-  const genBtn = document.getElementById('reminders-gen-btn');
-  const remindersContainer = document.getElementById('reminders-container');
-  const schedAllBtn = document.getElementById('reminders-schedule-all');
-
-  let reminderJobs = [];
-
-  genBtn.addEventListener('click', () => {
-    const val = pokerDateInput.value;
-    if (!val) { alert('Please enter the next poker night date.'); return; }
-
-    const pokerDate = localDatetimeToUTC(val);
-
-    const minus24h = new Date(pokerDate.getTime() - 24 * 60 * 60 * 1000);
-
-    const pokerFormatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Chicago',
-      year: 'numeric', month: '2-digit', day: '2-digit'
-    });
-    const pParts = pokerFormatter.formatToParts(pokerDate);
-    const pYear = +pParts.find(p => p.type === 'year').value;
-    const pMonth = +pParts.find(p => p.type === 'month').value;
-    const pDay = +pParts.find(p => p.type === 'day').value;
-
-    const noonCT = localDatetimeToUTC(`${pYear}-${String(pMonth).padStart(2,'0')}-${String(pDay).padStart(2,'0')}T12:00`);
-    const sixThirtyCT = localDatetimeToUTC(`${pYear}-${String(pMonth).padStart(2,'0')}-${String(pDay).padStart(2,'0')}T18:30`);
-
-    reminderJobs = [
-      {
-        label: '24H Before',
-        time: minus24h,
-        timeStr: ctDateStr(minus24h),
-        content: `🃏 Poker night is tomorrow at 7:30 PM CT! Hope to see everyone at the tables. 🂡`
-      },
-      {
-        label: 'Day-of 12:00 PM CT',
-        time: noonCT,
-        timeStr: ctDateStr(noonCT),
-        content: `🎰 Friendly reminder — Poker Night is TONIGHT at 7:30 PM CT! Get your chips ready. ♠️`
-      },
-      {
-        label: 'Day-of 6:30 PM CT',
-        time: sixThirtyCT,
-        timeStr: ctDateStr(sixThirtyCT),
-        content: `🂡 One hour to go! Tables open at 7:30 PM CT tonight. Don't be late! ♣️`
-      }
+  async function generateReminderTexts(firstHandDate) {
+    const tableOpenStr = (settings.pokerNightDefaults && settings.pokerNightDefaults.tableOpenTime) || '7:00 PM CT';
+    const firstHandStr = (settings.pokerNightDefaults && settings.pokerNightDefaults.firstHandTime) || '7:30 PM CT';
+    // Default texts (auto-generated, not regenerated by user)
+    const defaults = [
+      `🃏 Poker night is tomorrow at ${firstHandStr}! Hope to see everyone at the tables. 🂡`,
+      `🎰 Heads up — Poker Night is in ~4 hours. First hand at ${firstHandStr}. Get your chips ready. ♠️`,
+      `🂡 30 minutes out! Table opens at ${tableOpenStr.replace(' CT','')} — first hand at ${firstHandStr.replace(' CT','')}. Don't be late! ♣️`
     ];
+    if (!settings.openrouterKey) return defaults;
+    try {
+      const prompt = `Write 3 short Discord reminder messages for an online poker night. First hand at ${firstHandStr}. Table opens at ${tableOpenStr}.
 
-    renderReminders();
-    schedAllBtn.style.display = 'block';
-  });
+Reminder 1: 24 HOURS BEFORE — chill heads-up, "tomorrow"
+Reminder 2: 4 HOURS BEFORE — energetic
+Reminder 3: 30 MINUTES BEFORE — MUST literally say "Table opens at 7 — first hand at 7:30" (with the @everyone tag)
 
-  async function scheduleReminder(idx, immediate, dtOverride, channelId, channelName) {
-    const r = reminderJobs[idx];
-    const textarea = remindersContainer.querySelectorAll('.reminder-text')[idx];
-    const content = textarea ? textarea.value : r.content;
-
-    if (!channelId) { alert('Please select a channel for this reminder.'); return; }
-
-    const scheduledFor = immediate
-      ? Timestamp.now()
-      : Timestamp.fromDate(dtOverride || r.time);
-
-    const job = {
-      type: 'reminder',
-      channelId, channelName,
-      content,
-      scheduledFor,
-      status: 'pending',
-      createdAt: serverTimestamp(),
-      sentAt: null, error: null
-    };
-
-    await addDoc(collection(db, 'scheduled_jobs'), job);
-    const action = immediate ? 'sent immediately' : `scheduled for ${ctDateStr((dtOverride || r.time))}`;
-    await writeLog(immediate ? 'sent' : 'scheduled', `Reminder "${r.label}" ${action}`, { channelId });
-  }
-
-  function makeChannelDropdown() {
-    const sel = document.createElement('select');
-    sel.className = 'form-control channel-dropdown';
-    sel.innerHTML = '<option value="">-- Select Channel --</option>';
-    if (settings.channels && settings.channels.length > 0) {
-      settings.channels.forEach(ch => {
-        const opt = document.createElement('option');
-        opt.value = ch.id;
-        opt.textContent = `#${ch.name}`;
-        sel.appendChild(opt);
+Return ONLY a JSON array of 3 strings, each under 240 chars. Use 1-2 poker emojis per message. No code fences.`;
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${settings.openrouterKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': window.location.origin,
+          'X-Title': 'Pitboss - Shadow Spade Lounge'
+        },
+        body: JSON.stringify({
+          model: settings.openrouterModel || 'google/gemini-2.0-flash-lite-001',
+          messages: [{ role: 'user', content: prompt }]
+        })
       });
-    }
-    return sel;
-  }
-
-  function getCardChannel(chSel) {
-    const opt = chSel.options[chSel.selectedIndex];
-    return {
-      channelId: chSel.value,
-      channelName: opt ? opt.textContent.replace('#', '') : chSel.value
-    };
-  }
-
-  function renderReminders() {
-    remindersContainer.innerHTML = '';
-
-    reminderJobs.forEach((r, idx) => {
-      const card = document.createElement('div');
-      card.className = 'reminder-card';
-
-      const label = document.createElement('div');
-      label.className = 'reminder-card-label';
-      label.textContent = r.label;
-
-      const timeEl = document.createElement('div');
-      timeEl.className = 'reminder-card-time';
-      timeEl.textContent = r.timeStr;
-
-      const textarea = document.createElement('textarea');
-      textarea.className = 'reminder-text';
-      textarea.value = r.content;
-      textarea.rows = 3;
-
-      // Per-card channel selector
-      const chWrap = document.createElement('div');
-      chWrap.className = 'form-group';
-      chWrap.style.marginTop = '8px';
-      const chLabel = document.createElement('label');
-      chLabel.textContent = 'Channel';
-      chLabel.style.cssText = 'font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:var(--text-secondary);display:block;margin-bottom:6px;';
-      const chSel = makeChannelDropdown();
-      chWrap.appendChild(chLabel);
-      chWrap.appendChild(chSel);
-
-      const schedPickerEl = document.createElement('div');
-      schedPickerEl.className = 'schedule-picker';
-      schedPickerEl.innerHTML = `
-        <label>Date & Time (CT)</label>
-        <input type="datetime-local" class="form-control rem-dt" style="margin-bottom:8px" />
-        <button type="button" class="btn btn-gold btn-sm rem-confirm-sched">Confirm Schedule</button>
-      `;
-
-      const btnRow = document.createElement('div');
-      btnRow.className = 'btn-row';
-      btnRow.style.marginTop = '10px';
-
-      const testBtn = document.createElement('button');
-      testBtn.type = 'button';
-      testBtn.className = 'btn btn-outline btn-sm';
-      testBtn.textContent = '🧪 Test';
-      testBtn.addEventListener('click', async () => {
-        if (!settings.testChannelId) { alert('No test channel configured.'); return; }
-        const content = textarea.value;
-        await addDoc(collection(db, 'scheduled_jobs'), {
-          type: 'reminder', channelId: settings.testChannelId, channelName: settings.testChannelName,
-          content, scheduledFor: Timestamp.now(), status: 'pending',
-          createdAt: serverTimestamp(), sentAt: null, error: null
-        });
-        await writeLog('sent', `Test reminder sent: ${r.label}`, {});
-      });
-
-      const sendBtn = document.createElement('button');
-      sendBtn.type = 'button';
-      sendBtn.className = 'btn btn-gold btn-sm';
-      sendBtn.textContent = '⚡ Send Now';
-      sendBtn.addEventListener('click', async () => {
-        const { channelId, channelName } = getCardChannel(chSel);
-        await scheduleReminder(idx, true, null, channelId, channelName);
-        alert('Reminder sent!');
-      });
-
-      const schedBtn = document.createElement('button');
-      schedBtn.type = 'button';
-      schedBtn.className = 'btn btn-outline btn-sm';
-      schedBtn.textContent = '📅 Schedule';
-      schedBtn.addEventListener('click', () => schedPickerEl.classList.toggle('show'));
-
-      schedPickerEl.querySelector('.rem-confirm-sched').addEventListener('click', async () => {
-        const dtVal = schedPickerEl.querySelector('.rem-dt').value;
-        if (!dtVal) { alert('Please select a date and time.'); return; }
-        const dt = localDatetimeToUTC(dtVal);
-        const { channelId, channelName } = getCardChannel(chSel);
-        await scheduleReminder(idx, false, dt, channelId, channelName);
-        schedPickerEl.classList.remove('show');
-        alert(`Reminder scheduled for ${ctDateStr(dt)} CT`);
-      });
-
-      btnRow.appendChild(testBtn);
-      btnRow.appendChild(sendBtn);
-      btnRow.appendChild(schedBtn);
-
-      card.appendChild(label);
-      card.appendChild(timeEl);
-      card.appendChild(textarea);
-      card.appendChild(chWrap);
-      card.appendChild(btnRow);
-      card.appendChild(schedPickerEl);
-      remindersContainer.appendChild(card);
-    });
-  }
-
-  schedAllBtn.style.display = 'none';
-  schedAllBtn.addEventListener('click', async () => {
-    if (!reminderJobs.length) { alert('Generate reminders first.'); return; }
-    const cards = remindersContainer.querySelectorAll('.reminder-card');
-    // Validate all channels selected
-    let allValid = true;
-    cards.forEach((card, idx) => {
-      const chSel = card.querySelector('select');
-      if (!chSel || !chSel.value) {
-        alert(`Please select a channel for reminder ${idx + 1}.`);
-        allValid = false;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      let txt = data.choices?.[0]?.message?.content?.trim() || '';
+      txt = txt.replace(/^```(json)?\s*/i,'').replace(/\s*```$/,'').trim();
+      const m = txt.match(/\[[\s\S]*\]/);
+      if (!m) return defaults;
+      const arr = JSON.parse(m[0]);
+      if (!Array.isArray(arr) || arr.length !== 3) return defaults;
+      // Force 30-min copy correctness if it's missing
+      if (!/Table opens at 7\b/i.test(arr[2])) {
+        arr[2] = `🂡 30 min out — Table opens at 7, first hand at 7:30. @everyone don't be late! ♣️`;
       }
-    });
-    if (!allValid) return;
-    if (!confirm('Schedule all 3 reminders?')) return;
-
-    for (let i = 0; i < reminderJobs.length; i++) {
-      const card = cards[i];
-      const chSel = card.querySelector('select');
-      const { channelId, channelName } = getCardChannel(chSel);
-      await scheduleReminder(i, false, null, channelId, channelName);
+      return arr;
+    } catch (e) {
+      console.error('Reminder gen failed', e);
+      return defaults;
     }
-    await writeLog('scheduled', 'All 3 reminders scheduled', {});
-    alert('All 3 reminders scheduled!');
-  });
+  }
+
+  // Subscribe to vote_workflows for live status + edit_mode detection
+  subscribeToWorkflows();
+
+  function subscribeToWorkflows() {
+    const q = query(collection(db, 'vote_workflows'), orderBy('createdAt', 'desc'), limit(10));
+    onSnapshot(q, (snap) => {
+      wfList.innerHTML = '';
+      if (snap.empty) {
+        wfList.innerHTML = '<div class="queue-empty">No active workflows.</div>';
+        statusPill.textContent = 'Idle';
+        statusPill.className = 'pn-status-pill';
+        setStep('vote');
+        return;
+      }
+      let firstActive = null;
+      snap.forEach(d => {
+        const wf = { id: d.id, ...d.data() };
+        if (!firstActive && wf.status !== 'approved' && wf.status !== 'declined') firstActive = wf;
+        renderWorkflowCard(wf);
+      });
+
+      // Pick the most recent non-terminal workflow to drive UI
+      const drive = firstActive || { id: snap.docs[0].id, ...snap.docs[0].data() };
+      driveUiFromWorkflow(drive);
+    });
+  }
+
+  function driveUiFromWorkflow(wf) {
+    const s = wf.status;
+    if (s === 'scheduled') { setStep('vote'); statusPill.textContent = 'Vote Scheduled'; statusPill.className = 'pn-status-pill pill-vote'; }
+    else if (s === 'awaiting_results') { setStep('watch'); statusPill.textContent = 'Watching Vote'; statusPill.className = 'pn-status-pill pill-watching'; }
+    else if (s === 'generating') { setStep('generate'); statusPill.textContent = 'Generating'; statusPill.className = 'pn-status-pill pill-pending'; }
+    else if (s === 'approval_pending') { setStep('approve'); statusPill.textContent = 'Awaiting Approval'; statusPill.className = 'pn-status-pill pill-pending'; }
+    else if (s === 'edit_mode') { showEditMode(wf); }
+    else if (s === 'approved') { setStep('schedule'); statusPill.textContent = 'Approved'; statusPill.className = 'pn-status-pill pill-approved'; }
+    else if (s === 'declined') { statusPill.textContent = 'Declined'; statusPill.className = 'pn-status-pill pill-declined'; }
+  }
+
+  function renderWorkflowCard(wf) {
+    const card = document.createElement('div');
+    card.className = 'pn-workflow-card';
+    const header = document.createElement('div');
+    header.className = 'pn-wf-header';
+    const title = document.createElement('div');
+    title.className = 'pn-wf-title';
+    title.textContent = `${MONTH_NAMES[(wf.month||1)-1] || ''} ${wf.year || ''} Workflow`;
+    const pill = document.createElement('span');
+    pill.className = 'pn-status-pill pill-' + (wf.status === 'approved' ? 'approved' : wf.status === 'declined' ? 'declined' : wf.status === 'edit_mode' ? 'edit' : wf.status === 'awaiting_results' ? 'watching' : 'pending');
+    pill.textContent = (wf.status || 'unknown').replace(/_/g, ' ');
+    header.appendChild(title);
+    header.appendChild(pill);
+
+    const meta = document.createElement('div');
+    meta.className = 'pn-wf-meta';
+    const parts = [];
+    if (wf.pollScheduledFor) parts.push(`Vote: ${ctDateStr(wf.pollScheduledFor.toDate())}`);
+    if (wf.winningWeekday) parts.push(`Winner: ${wf.winningWeekday}`);
+    if (wf.computedFirstHandUtc) parts.push(`First hand: ${ctDateStr(wf.computedFirstHandUtc.toDate())}`);
+    meta.textContent = parts.join('  •  ');
+
+    const actions = document.createElement('div');
+    actions.className = 'pn-wf-actions';
+
+    if (wf.status === 'edit_mode' || wf.status === 'approval_pending' || wf.status === 'declined') {
+      const editBtn = document.createElement('button');
+      editBtn.className = 'btn btn-outline btn-sm';
+      editBtn.textContent = '✏️ Open in Editor';
+      editBtn.addEventListener('click', () => showEditMode(wf));
+      actions.appendChild(editBtn);
+    }
+    if (wf.status !== 'approved') {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'btn btn-outline btn-sm';
+      cancelBtn.textContent = '🗑 Cancel Workflow';
+      cancelBtn.addEventListener('click', async () => {
+        if (!confirm('Cancel this workflow? (Pending poll/announcement jobs will not be auto-cancelled.)')) return;
+        await updateDoc(doc(db, 'vote_workflows', wf.id), { status: 'declined', declinedAt: serverTimestamp(), declinedSource: 'dashboard_cancel' });
+        await writeLog('declined', `Workflow ${wf.id.slice(0,6)} cancelled from dashboard.`, { workflowId: wf.id });
+      });
+      actions.appendChild(cancelBtn);
+    }
+
+    card.appendChild(header);
+    card.appendChild(meta);
+    if (actions.children.length) card.appendChild(actions);
+    wfList.appendChild(card);
+  }
 })();
 
 // ==================== JOIN THE TABLE ====================
@@ -1071,7 +935,6 @@ Rules:
   const previewEl = document.getElementById('table-preview');
   const warnEl = document.getElementById('table-config-warn');
 
-  // Default schedule time: 7:00 PM CT today
   (function setDefaultTime() {
     const now = new Date();
     const fmt = new Intl.DateTimeFormat('en-US', {
@@ -1088,87 +951,63 @@ Rules:
   function buildMessage(url) {
     return `The Table is LIVE: ${url}\n⚠️   Starting in: 30 min\n\n@everyone`;
   }
-
   function checkConfig() {
     const configured = settings.joinTableChannelId && settings.activeCategoryId;
     warnEl.style.display = configured ? 'none' : 'block';
     return !!configured;
   }
-
   tableUrlInput.addEventListener('input', () => {
     const url = tableUrlInput.value.trim();
-    if (url) {
-      previewEl.textContent = buildMessage(url);
-      previewEl.style.display = 'block';
-    } else {
-      previewEl.style.display = 'none';
-    }
+    if (url) { previewEl.textContent = buildMessage(url); previewEl.style.display = 'block'; }
+    else { previewEl.style.display = 'none'; }
   });
-
   document.getElementById('table-btn-test').addEventListener('click', async () => {
     const url = tableUrlInput.value.trim();
     if (!url) { alert('Please enter a table URL.'); return; }
-    if (!settings.testChannelId) { alert('No test channel configured. Go to Settings.'); return; }
-    const content = buildMessage(url);
+    if (!settings.testChannelId) { alert('No test channel configured.'); return; }
     await addDoc(collection(db, 'scheduled_jobs'), {
-      type: 'message',
-      channelId: settings.testChannelId,
-      channelName: settings.testChannelName,
-      content,
-      scheduledFor: Timestamp.now(),
-      status: 'pending',
-      createdAt: serverTimestamp(),
-      sentAt: null, error: null
+      type: 'message', channelId: settings.testChannelId, channelName: settings.testChannelName,
+      content: buildMessage(url), scheduledFor: Timestamp.now(), status: 'pending',
+      createdAt: serverTimestamp(), sentAt: null, error: null
     });
     await writeLog('sent', `Test: Join The Table message sent to #${settings.testChannelName}`, {});
   });
-
   document.getElementById('table-btn-schedule').addEventListener('click', async () => {
     const url = tableUrlInput.value.trim();
     if (!url) { alert('Please enter a table URL.'); return; }
-    if (!checkConfig()) { alert('Configure Join-the-Table settings first (Settings → 🃏 Join The Table).'); return; }
+    if (!checkConfig()) { alert('Configure Join-the-Table settings first.'); return; }
     const dtVal = schedTimeInput.value;
     if (!dtVal) { alert('Please set a post time.'); return; }
     const scheduledDate = localDatetimeToUTC(dtVal);
     if (scheduledDate <= new Date()) { alert('Scheduled time must be in the future.'); return; }
-
-    const content = buildMessage(url);
-    const job = {
-      type: 'table_live',
-      channelId: settings.joinTableChannelId,
+    await addDoc(collection(db, 'scheduled_jobs'), {
+      type: 'table_live', channelId: settings.joinTableChannelId,
       channelName: settings.joinTableChannelName || 'join-the-game',
-      content,
-      tableUrl: url,
-      activeCategoryId: settings.activeCategoryId,
-      scheduledFor: Timestamp.fromDate(scheduledDate),
-      status: 'pending',
-      createdAt: serverTimestamp(),
-      sentAt: null, error: null
-    };
-    await addDoc(collection(db, 'scheduled_jobs'), job);
+      content: buildMessage(url), tableUrl: url, activeCategoryId: settings.activeCategoryId,
+      scheduledFor: Timestamp.fromDate(scheduledDate), status: 'pending',
+      createdAt: serverTimestamp(), sentAt: null, error: null
+    });
     await writeLog('scheduled', `Join The Table scheduled for ${ctDateStr(scheduledDate)}`, { url });
     alert(`✅ Table link scheduled for ${ctDateStr(scheduledDate)} CT`);
     tableUrlInput.value = '';
     previewEl.style.display = 'none';
   });
-
-  // Check config on load
   checkConfig();
 })();
 
 // ==================== COLLAPSIBLE PANELS ====================
 (function initDashboardCollapsibles() {
-  const PANELS = ['dash-panel-broadcast', 'dash-panel-poll', 'dash-panel-remind'];
+  const PANELS = ['dash-panel-pokernight','dash-panel-broadcast','dash-panel-jointable'];
   PANELS.forEach(panelId => {
     const panel = document.getElementById(panelId);
     if (!panel) return;
     const header = panel.querySelector('.panel-header.collapsible');
     if (!header) return;
-
-    // Default: collapsed. Restore if user previously opened it.
-    const savedOpen = localStorage.getItem(`dash-panel-open-${panelId}`) === 'true';
-    if (!savedOpen) panel.classList.add('collapsed');
-
+    const savedOpen = localStorage.getItem(`dash-panel-open-${panelId}`);
+    // Default poker night open, others collapsed
+    const defaultOpen = panelId === 'dash-panel-pokernight';
+    const open = savedOpen === null ? defaultOpen : savedOpen === 'true';
+    if (!open) panel.classList.add('collapsed');
     header.addEventListener('click', () => {
       panel.classList.toggle('collapsed');
       localStorage.setItem(`dash-panel-open-${panelId}`, !panel.classList.contains('collapsed'));
@@ -1176,5 +1015,6 @@ Rules:
   });
 })();
 
-// ==================== UNIFIED QUEUE ====================
+// ==================== START ====================
 subscribeToUnifiedQueue();
+subscribeToActivityLog();
