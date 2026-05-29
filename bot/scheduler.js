@@ -197,7 +197,7 @@ async function sendPoll(client, job, writeLog) {
     question: { text: title || 'Poker Night Vote' },
     answers,
     allowMultiselect: multiSelect !== false,
-    duration: duration || 168 // hours; 168 = 7 days
+    duration: Math.min(duration || 168, 768) // hours; Discord caps polls at 768h (32d)
   };
 
   const sent = await channel.send({ poll: pollPayload });
