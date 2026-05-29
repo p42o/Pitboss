@@ -3,6 +3,8 @@ const { Client, GatewayIntentBits, ActivityType, Events, PermissionsBitField } =
 const admin = require('firebase-admin');
 const { startScheduler } = require('./scheduler');
 const { startVoteWatcher } = require('./voteWatcher');
+const engine = require('./lib/scheduleEngine.cjs');
+const { surfaceFailure } = require('./lib/failures.cjs');
 
 // ==================== FIREBASE INIT ====================
 const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -350,7 +352,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const id = interaction.customId || '';
   if (!id.startsWith('pn-')) return;
 
-  const [action, workflowId] = id.split(':');
+  const parts = id.split(':');
+  const action = parts[0];
+  const workflowId = parts[1];
+  const optionId = parts[2]; // present for pn-pick:<wf>:<optionId>
   if (!workflowId) return;
 
   // Permission check: bot owner (approverUserId) OR admin perms in this guild OR
@@ -386,64 +391,95 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     const wf = wfSnap.data();
 
-    if (action === 'pn-approve') {
-      // Schedule announcement + 3 reminders
-      const firstHandDate = wf.computedFirstHandUtc?.toDate ? wf.computedFirstHandUtc.toDate() : new Date(wf.computedFirstHandUtc);
+    const ctFull = (d) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'short' }).format(d);
+
+    if (action === 'pn-pick') {
+      // Tie-break: host chose the winning date.
+      if (!optionId) { await interaction.reply({ content: 'No option specified.', ephemeral: true }); return; }
+      if (wf.status !== 'tie_pending') { await interaction.reply({ content: `Already resolved (${wf.status}).`, ephemeral: true }); return; }
+      const opt = (wf.options || []).find((o) => o.id === optionId);
+      if (!opt) { await interaction.reply({ content: 'That option is no longer available.', ephemeral: true }); return; }
+      await db.collection('scheduled_jobs').doc(`tiesafety_${workflowId}`).delete().catch(() => {}); // cancel safety net
+      const fh = opt.startAtUtc?.toDate ? opt.startAtUtc.toDate() : new Date(opt.isoDate);
+      await wfRef.update({
+        status: 'generating', winnerOptionId: opt.id,
+        firstHandAt: admin.firestore.Timestamp.fromDate(fh),
+        winningLabel: opt.label, winningWeekday: opt.weekday,
+        computedFirstHandUtc: admin.firestore.Timestamp.fromDate(fh),
+        tieResolvedBy: 'host', tieResolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      await interaction.update({ content: `🟰 Tie broken — **${opt.label}** selected. Generating the announcement…`, components: [] });
+      await writeLog('approved', `Tie resolved by ${interaction.user.tag} → ${opt.label} for ${workflowId.slice(0, 6)}.`, { workflowId });
+
+    } else if (action === 'pn-approve') {
+      // Idempotency: never double-approve / double-enqueue.
+      if (['approved', 'table_live', 'complete'].includes(wf.status)) {
+        await interaction.reply({ content: 'Already approved — nothing more to do.', ephemeral: true });
+        return;
+      }
+      const firstHandDate = wf.firstHandAt?.toDate ? wf.firstHandAt.toDate()
+        : (wf.computedFirstHandUtc?.toDate ? wf.computedFirstHandUtc.toDate() : new Date(wf.computedFirstHandUtc));
       if (!firstHandDate || isNaN(+firstHandDate)) {
         await interaction.reply({ content: 'Workflow missing first-hand date.', ephemeral: true });
         return;
       }
-      const offsets = wf.reminderOffsets || [1440, 240, 30];
-      const announceChannelId = wf.announceChannelId;
-      const announceChannelName = wf.announceChannelName || 'announcements';
-      const reminderChannelId = wf.reminderChannelId || announceChannelId;
-      const reminderChannelName = wf.reminderChannelName || announceChannelName;
-
-      // Announcement: send immediately
-      await db.collection('scheduled_jobs').add({
-        type: 'announcement',
-        channelId: announceChannelId,
-        channelName: announceChannelName,
-        content: wf.generatedAnnouncementText,
-        imageUrl: wf.generatedImageUrl || null,
-        scheduledFor: admin.firestore.Timestamp.now(),
-        status: 'pending',
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        workflowId,
-        sentAt: null, error: null
-      });
-
-      // Reminders: relative to firstHand, offsets in minutes
-      const reminderTexts = buildDefaultReminderTexts(firstHandDate, wf.gameTime, wf.tableOpenTime);
-      for (let i = 0; i < offsets.length; i++) {
-        const t = new Date(firstHandDate.getTime() - offsets[i] * 60 * 1000);
-        if (t <= new Date()) continue;
-        await db.collection('scheduled_jobs').add({
-          type: 'reminder',
-          channelId: reminderChannelId,
-          channelName: reminderChannelName,
-          content: reminderTexts[i] || `Reminder: poker is coming up.`,
-          scheduledFor: admin.firestore.Timestamp.fromDate(t),
-          status: 'pending',
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          workflowId,
-          sentAt: null, error: null
-        });
+      const nowD = new Date();
+      const voteCloseDate = wf.voteCloseAt?.toDate ? wf.voteCloseAt.toDate() : null;
+      // INVARIANT (the bug fix): first hand must be in the future AND after the vote closed.
+      if (firstHandDate <= nowD || (voteCloseDate && firstHandDate <= voteCloseDate)) {
+        await wfRef.update({ status: 'edit_mode', editRequestedAt: admin.firestore.FieldValue.serverTimestamp(), editRequestedBy: interaction.user.id });
+        await interaction.update({ content: `⛔ Can't approve — first hand (${ctFull(firstHandDate)}) is in the past or before the vote closed. Sent to edit mode.`, components: [] });
+        const settings = (await db.collection('settings').doc('config').get()).data() || {};
+        await surfaceFailure({ db, client, writeLog, settings }, { workflowId, scope: 'approve', level: 'error', message: 'Approval blocked: first hand is not after both now and the vote close.' });
+        return;
       }
 
-      await wfRef.update({
-        status: 'approved',
-        approvedAt: admin.firestore.FieldValue.serverTimestamp(),
-        approvedBy: interaction.user.id,
-        approvedSource: 'discord_button'
+      // Double-enqueue guard (single-field index only — no composite needed).
+      const existing = await db.collection('scheduled_jobs').where('workflowId', '==', workflowId).get();
+      const already = existing.docs.some((d) => ['announcement', 'reminder'].includes(d.data().type));
+      if (already) {
+        await wfRef.update({ status: 'approved', approvedAt: admin.firestore.FieldValue.serverTimestamp(), approvedBy: interaction.user.id, approvedSource: 'discord_button' });
+        await interaction.update({ content: '✅ Jobs were already enqueued — marked approved.', components: [] });
+        return;
+      }
+
+      // Announcement: send immediately.
+      await db.collection('scheduled_jobs').add({
+        type: 'announcement', channelId: wf.announceChannelId, channelName: wf.announceChannelName || 'announcements',
+        content: wf.generatedAnnouncementText, imageUrl: wf.generatedImageUrl || null,
+        scheduledFor: admin.firestore.Timestamp.now(), status: 'pending',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(), workflowId, sentAt: null, error: null,
       });
 
-      const sendStr = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' }).format(new Date());
-      await interaction.update({
-        content: `✅ **APPROVED** — sending now (${sendStr} CT). Reminders scheduled.`,
-        components: []
+      // Reminders via the engine — every offset is scheduled OR surfaced, never dropped.
+      const offsets = wf.reminderOffsets || engine.DEFAULT_REMINDER_OFFSETS;
+      const plan = engine.planReminders({ firstHandAt: firstHandDate, now: nowD, offsetsMinutes: offsets });
+      const reminderChannelId = wf.reminderChannelId || wf.announceChannelId;
+      const reminderChannelName = wf.reminderChannelName || wf.announceChannelName || 'announcements';
+      for (const s of plan.scheduled) {
+        await db.collection('scheduled_jobs').add({
+          type: 'reminder', channelId: reminderChannelId, channelName: reminderChannelName,
+          content: reminderTextForOffset(s.offsetMinutes, wf.gameTime, wf.tableOpenTime), offsetMinutes: s.offsetMinutes,
+          scheduledFor: admin.firestore.Timestamp.fromDate(s.fireAt), status: 'pending',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(), workflowId, sentAt: null, error: null,
+        });
+      }
+      const reminderResults = [
+        ...plan.scheduled.map((s) => ({ offsetMinutes: s.offsetMinutes, status: 'scheduled', fireAt: admin.firestore.Timestamp.fromDate(s.fireAt) })),
+        ...plan.skipped.map((s) => ({ offsetMinutes: s.offsetMinutes, status: 'skipped', reason: s.reason })),
+      ];
+      await wfRef.update({
+        status: 'approved', approvedAt: admin.firestore.FieldValue.serverTimestamp(),
+        approvedBy: interaction.user.id, approvedSource: 'discord_button',
+        reminderResults, hasSkippedReminders: plan.skipped.length > 0,
       });
-      await writeLog('approved', `Workflow ${workflowId.slice(0,6)} approved by ${interaction.user.tag}.`, { workflowId });
+      if (plan.skipped.length) {
+        const settings = (await db.collection('settings').doc('config').get()).data() || {};
+        await surfaceFailure({ db, client, writeLog, settings }, { workflowId, scope: 'reminders', level: 'warning', message: `${plan.skipped.length} reminder(s) skipped (too close to game time): ${plan.skipped.map((s) => s.offsetMinutes + 'm').join(', ')}.` });
+      }
+      const skipNote = plan.skipped.length ? ` (${plan.skipped.length} skipped — too close)` : '';
+      await interaction.update({ content: `✅ **APPROVED** — announcement sending now; ${plan.scheduled.length} reminder(s) scheduled${skipNote}.`, components: [] });
+      await writeLog('approved', `Workflow ${workflowId.slice(0, 6)} approved by ${interaction.user.tag}.`, { workflowId });
 
     } else if (action === 'pn-decline') {
       await wfRef.update({
@@ -483,14 +519,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-function buildDefaultReminderTexts(firstHandDate, gameTime, tableOpenTime) {
-  const firstHandStr = gameTime || '7:30 PM CT';
-  const tableOpenStr = tableOpenTime || '7:00 PM CT';
-  return [
-    `🃏 Poker night is tomorrow at ${firstHandStr}! Hope to see everyone at the tables. 🂡`,
-    `🎰 Heads up — Poker Night is in ~4 hours. First hand at ${firstHandStr}. Get your chips ready. ♠️`,
-    `🂡 30 minutes out! Table opens at 7 — first hand at 7:30. @everyone don't be late! ♣️`
-  ];
+// Pick reminder copy by how far out the offset is (works with any offset set).
+function reminderTextForOffset(offsetMinutes, gameTime, tableOpenTime) {
+  const fh = gameTime || '7:30 PM CT';
+  const fhShort = fh.replace(' CT', '');
+  const to = (tableOpenTime || '7:00 PM CT').replace(' CT', '');
+  if (offsetMinutes >= 1440) return `🃏 Poker night is tomorrow at ${fh}! Hope to see everyone at the tables. 🂡`;
+  if (offsetMinutes >= 180) return `🎰 Heads up — Poker Night is in a few hours. First hand at ${fh}. Get your chips ready. ♠️`;
+  if (offsetMinutes >= 45) return `♣️ Poker Night is in about an hour — table opens at ${to}, first hand at ${fhShort}.`;
+  return `🂡 ${offsetMinutes} minutes out! Table opens at ${to} — first hand at ${fhShort}. @everyone don't be late! ♣️`;
 }
 
 // ==================== START ====================

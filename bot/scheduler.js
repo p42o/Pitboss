@@ -1,4 +1,6 @@
 const admin = require('firebase-admin');
+const { surfaceFailure } = require('./lib/failures.cjs');
+const engine = require('./lib/scheduleEngine.cjs');
 
 const POLL_INTERVAL_MS = 30 * 1000; // 30 seconds
 
@@ -56,6 +58,14 @@ async function processJob(client, db, writeLog, job, docRef) {
   }
 
   try {
+    // Internal (non-channel) job: the tie safety-net timer.
+    if (job.type === 'tie_safety_net') {
+      await handleTieSafetyNet(client, db, writeLog, job);
+      await docRef.update({ status: 'sent', sentAt: admin.firestore.FieldValue.serverTimestamp() });
+      console.log(`[Scheduler] Job ${job.id} (tie_safety_net) completed.`);
+      return;
+    }
+
     if (job.type === 'message' || job.type === 'reminder') {
       await sendMessage(client, job);
     } else if (job.type === 'poll') {
@@ -80,20 +90,64 @@ async function processJob(client, db, writeLog, job, docRef) {
       type: job.type
     });
 
+    // Mark this reminder's result on its workflow (no silent loss).
+    if (job.workflowId && job.type === 'reminder') {
+      try {
+        await db.collection('vote_workflows').doc(job.workflowId).update({
+          reminderResults: admin.firestore.FieldValue.arrayUnion({
+            jobId: job.id, offsetMinutes: job.offsetMinutes ?? null, status: 'sent', at: admin.firestore.Timestamp.now(),
+          }),
+        });
+      } catch (_) {}
+    }
+
     console.log(`[Scheduler] Job ${job.id} completed successfully.`);
   } catch (err) {
     console.error(`[Scheduler] Job ${job.id} failed:`, err.message);
 
-    await docRef.update({
-      status: 'failed',
-      error: err.message
-    });
+    await docRef.update({ status: 'failed', error: err.message });
 
-    await writeLog('error', `Job ${job.id} (${job.type}) failed: ${err.message}`, {
-      jobId: job.id,
-      channelId: job.channelId
+    // No silent failures — surface to Parker + the workflow's failures[].
+    let settings = {};
+    try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
+    await surfaceFailure({ db, client, writeLog, settings }, {
+      workflowId: job.workflowId, scope: `job_${job.type}`, level: 'error',
+      message: `Job ${job.id} (${job.type}) failed: ${err.message}`, meta: { jobId: job.id, channelId: job.channelId || null },
     });
   }
+}
+
+/**
+ * tie_safety_net — if a tie is still unresolved at the deadline, auto-pick the
+ * earliest tied date (preserves maximum lead time) and hand off to generation.
+ */
+async function handleTieSafetyNet(client, db, writeLog, job) {
+  const wfRef = db.collection('vote_workflows').doc(job.workflowId);
+  const snap = await wfRef.get();
+  if (!snap.exists) return;
+  const wf = snap.data();
+  if (wf.status !== 'tie_pending') return; // host already picked — nothing to do
+
+  const tied = (wf.options || [])
+    .filter((o) => (wf.tiedOptionIds || []).includes(o.id))
+    .map((o) => ({ ...o, startAtUtc: o.startAtUtc && o.startAtUtc.toDate ? o.startAtUtc.toDate() : new Date(o.isoDate) }));
+  if (!tied.length) return;
+
+  const winner = engine.earliestOf(tied);
+  await wfRef.update({
+    status: 'generating',
+    winnerOptionId: winner.id,
+    firstHandAt: admin.firestore.Timestamp.fromDate(winner.startAtUtc),
+    winningLabel: winner.label, winningWeekday: winner.weekday,
+    computedFirstHandUtc: admin.firestore.Timestamp.fromDate(winner.startAtUtc),
+    tieResolvedBy: 'auto_earliest', tieResolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  let settings = {};
+  try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
+  await surfaceFailure({ db, client, writeLog, settings }, {
+    workflowId: job.workflowId, scope: 'tie', level: 'warning',
+    message: `No host pick in time — auto-selected the earliest tied date: ${winner.label}.`,
+  });
 }
 
 /**
@@ -143,7 +197,7 @@ async function sendPoll(client, job, writeLog) {
     question: { text: title || 'Poker Night Vote' },
     answers,
     allowMultiselect: multiSelect !== false,
-    duration: duration || 168 // hours; 168 = 7 days
+    duration: Math.min(duration || 168, 768) // hours; Discord caps polls at 768h (32d)
   };
 
   const sent = await channel.send({ poll: pollPayload });
@@ -152,15 +206,39 @@ async function sendPoll(client, job, writeLog) {
   if (job.workflowId) {
     try {
       const db = admin.firestore();
-      const closesAt = new Date(Date.now() + (duration || 168) * 3600 * 1000);
-      await db.collection('vote_workflows').doc(job.workflowId).update({
-        status: 'awaiting_results',
+      const wfRef = db.collection('vote_workflows').doc(job.workflowId);
+      const wfSnap = await wfRef.get();
+      const wfData = wfSnap.exists ? wfSnap.data() : {};
+
+      const update = {
+        status: 'vote_open',
         pollMessageId: sent.id,
         pollChannelId: job.channelId,
         pollSentAt: admin.firestore.FieldValue.serverTimestamp(),
-        pollClosesAt: admin.firestore.Timestamp.fromDate(closesAt)
-      });
-      await writeLog('vote_open', `Vote opened for workflow ${job.workflowId.slice(0,6)}; closes ${closesAt.toISOString()}.`, { workflowId: job.workflowId });
+      };
+
+      // Map Discord's answer ids back onto our structured options BY TEXT
+      // (Discord does not guarantee send-order == answer id order).
+      const sentAnswers = [...(sent.poll && sent.poll.answers && sent.poll.answers.values ? sent.poll.answers.values() : [])];
+      const idByText = {};
+      for (const a of sentAnswers) idByText[String(a.text || a.answer || '').trim()] = String(a.id);
+      if (Array.isArray(wfData.options) && wfData.options.length) {
+        update.options = wfData.options.map((o) => ({
+          ...o,
+          discordAnswerId: idByText[String(o.label || '').trim()] || o.discordAnswerId || null,
+        }));
+      }
+
+      // Authoritative close time straight from the sent poll.
+      const expires = sent.poll && sent.poll.expiresTimestamp;
+      const closeTs = expires
+        ? admin.firestore.Timestamp.fromMillis(expires)
+        : admin.firestore.Timestamp.fromDate(new Date(Date.now() + (duration || 168) * 3600 * 1000));
+      update.voteCloseAt = closeTs;
+      update.pollClosesAt = closeTs; // legacy mirror
+
+      await wfRef.update(update);
+      await writeLog('vote_open', `Vote opened for workflow ${job.workflowId.slice(0,6)}; closes ${closeTs.toDate().toISOString()}.`, { workflowId: job.workflowId });
     } catch (wfErr) {
       console.warn('[Scheduler] Workflow advance failed:', wfErr.message);
       await writeLog('warning', `Failed to advance vote workflow: ${wfErr.message}`, { workflowId: job.workflowId });
