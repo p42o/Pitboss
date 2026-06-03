@@ -3,6 +3,8 @@ const { Client, GatewayIntentBits, ActivityType, Events, PermissionsBitField } =
 const admin = require('firebase-admin');
 const { startScheduler } = require('./scheduler');
 const { startVoteWatcher } = require('./voteWatcher');
+const { startServerStats } = require('./serverStats.cjs');
+const { handleMention } = require('./conversational.cjs');
 const engine = require('./lib/scheduleEngine.cjs');
 const { surfaceFailure } = require('./lib/failures.cjs');
 
@@ -64,6 +66,7 @@ client.once('ready', async () => {
   startScheduler(client, db, writeLog);
   startVoteWatcher(client, db, writeLog);
   startHeartbeat(tag);
+  startServerStats(client, db, writeLog);
   await cleanupStalePendingCommands();
   await cleanupOldDocuments();
   startCommandWatcher();
@@ -307,6 +310,11 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
+    // Action engine: schedule reminder/message, "next game", "what's scheduled".
+    // Returns true if it took an action — then skip the default witty reply.
+    const handledAction = await handleMention({ message, client, db, settings, writeLog, engine });
+    if (handledAction) return;
+
     const userText = message.content.replace(/<@!?\d+>/g, '').trim();
     const prompt = userText || 'Someone tagged you without saying anything.';
 
@@ -394,12 +402,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const ctFull = (d) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'short' }).format(d);
 
     if (action === 'pn-pick') {
-      // Tie-break: host chose the winning date.
+      // Tie-break: host chose the winning date — manual shortcut that overrides the
+      // 24h runoff. Valid while the tie is pending, mid-runoff-setup, or the runoff
+      // poll is open (round >= 2).
       if (!optionId) { await interaction.reply({ content: 'No option specified.', ephemeral: true }); return; }
-      if (wf.status !== 'tie_pending') { await interaction.reply({ content: `Already resolved (${wf.status}).`, ephemeral: true }); return; }
+      const inTie = wf.status === 'tie_pending' || wf.status === 'tie_runoff' ||
+        (wf.status === 'vote_open' && (wf.round || 1) >= 2);
+      if (!inTie) { await interaction.reply({ content: `Already resolved (${wf.status}).`, ephemeral: true }); return; }
       const opt = (wf.options || []).find((o) => o.id === optionId);
       if (!opt) { await interaction.reply({ content: 'That option is no longer available.', ephemeral: true }); return; }
-      await db.collection('scheduled_jobs').doc(`tiesafety_${workflowId}`).delete().catch(() => {}); // cancel safety net
+      // Cancel the safety net + any not-yet-posted runoff poll so nothing fires after the host call.
+      await db.collection('scheduled_jobs').doc(`tiesafety_${workflowId}`).delete().catch(() => {});
+      await db.collection('scheduled_jobs').doc(`runoff_${workflowId}`).get()
+        .then((s) => (s.exists && s.data().status === 'pending')
+          ? s.ref.update({ status: 'cancelled', cancelledAt: admin.firestore.FieldValue.serverTimestamp() })
+          : null)
+        .catch(() => {});
       const fh = opt.startAtUtc?.toDate ? opt.startAtUtc.toDate() : new Date(opt.isoDate);
       await wfRef.update({
         status: 'generating', winnerOptionId: opt.id,

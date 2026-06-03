@@ -126,7 +126,11 @@ async function handleTieSafetyNet(client, db, writeLog, job) {
   const snap = await wfRef.get();
   if (!snap.exists) return;
   const wf = snap.data();
-  if (wf.status !== 'tie_pending') return; // host already picked — nothing to do
+  // Runoff-aware: the net must catch a tie that's pending, mid-runoff-setup, or in an
+  // open runoff poll that never resolved (bot offline through it). Skip only when it's
+  // already resolved, or while a runoff poll is still open and not yet expired.
+  if (!['tie_pending', 'tie_runoff', 'vote_open'].includes(wf.status)) return; // already resolved
+  if (wf.status === 'vote_open' && wf.runoffEndsAt?.toDate && Date.now() < wf.runoffEndsAt.toDate().getTime()) return;
 
   const tied = (wf.options || [])
     .filter((o) => (wf.tiedOptionIds || []).includes(o.id))

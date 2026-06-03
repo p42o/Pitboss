@@ -249,12 +249,36 @@ function computeTieDeadline(params) {
   return new Date(Math.min(graceDeadline.getTime(), hardDeadline.getTime()));
 }
 
+/**
+ * Build the runoff poll payload + the active option set for a 24h tie-breaker.
+ * Used when a vote ties: the bot re-posts a fresh poll containing ONLY the tied
+ * options, single-select, running `durationHours` (default 24h) to force a break.
+ * @param {Array} tiedOptions  options (with startAtUtc:Date) that tied.
+ * @param {Object} opts        { durationHours=24, titlePrefix }
+ * @returns { pollData, options, runoffOptionIds }
+ */
+function buildRunoffPoll(tiedOptions, opts = {}) {
+  const durationHours = opts.durationHours == null ? 24 : opts.durationHours;
+  const titlePrefix = opts.titlePrefix || 'TIE BREAKER — 24h runoff';
+  const options = tiedOptions
+    .slice()
+    .sort((a, b) => a.startAtUtc.getTime() - b.startAtUtc.getTime())
+    .map((o) => ({ ...o, voteCount: 0 }));
+  const pollData = {
+    title: titlePrefix,
+    options: options.map((o) => ({ text: o.label, emoji: o.emoji || '🃏' })),
+    multiSelect: false,            // single-select forces a sharper break
+    duration: durationHours,
+  };
+  return { pollData, options, runoffOptionIds: options.map((o) => o.id) };
+}
+
 const api = {
   TZ, WEEKDAY_NAMES, MONTH_NAMES, DEFAULT_REMINDER_OFFSETS,
   parseClockTime, ctWallClockToUtc, ctOffsetString, ctIsoString,
   nextMonthOf, getCandidateDates, buildOptionLabel, buildPollOptions,
   earliestOf, planVoteWindow, replanDroppingEarliest, planReminders,
-  resolveWinningOption, computeTieDeadline,
+  resolveWinningOption, computeTieDeadline, buildRunoffPoll,
 };
 
 module.exports = api;

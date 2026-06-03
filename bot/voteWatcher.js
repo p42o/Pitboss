@@ -16,8 +16,9 @@ const POLL_INTERVAL_MS = 60 * 1000; // check every 60s
 const { Timestamp, FieldValue } = admin.firestore;
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-// Statuses the watcher acts on. Includes the legacy 'awaiting_results' alias.
-const WATCHED = ['vote_open', 'awaiting_results', 'tie_pending', 'generating'];
+// Statuses the watcher acts on. Includes the legacy 'awaiting_results' alias and
+// 'tie_runoff' (a tie that's mid-runoff-setup before its poll posts).
+const WATCHED = ['vote_open', 'awaiting_results', 'tie_pending', 'tie_runoff', 'generating'];
 
 const tsToDate = (ts, isoFallback) => (ts && ts.toDate ? ts.toDate() : new Date(isoFallback));
 
@@ -81,26 +82,90 @@ Use month-thematic emojis (e.g. 🎃 October, 🎄 December, 🌸 April). Output
 }
 
 /**
- * Read the closed poll and return per-answer vote counts keyed both by Discord
- * answer id and by answer text (the robust mapping back to our options[]).
+ * Normalize poll-answer / option text for robust matching.
+ * Strips emoji, collapses whitespace, lowercases, drops punctuation that
+ * Discord renders inconsistently. Returns a comparable key.
+ */
+function normalizeAnswerText(s) {
+  return String(s == null ? '' : s)
+    // strip variation selectors + most emoji / pictographs
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w\s/:]/g, '') // keep word chars, space, slash, colon (dates/times)
+    .trim()
+    .toLowerCase();
+}
+
+/** Compare two normalized strings tolerant of Discord's ~55-char answer-text truncation. */
+function normalizedTextMatch(optText, answerText) {
+  const a = normalizeAnswerText(optText);
+  const b = normalizeAnswerText(answerText);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // Discord truncates answer text to ~55 chars; compare on the shorter prefix.
+  const n = Math.min(a.length, b.length, 50);
+  if (n < 6) return false; // too short to trust a prefix match
+  return a.slice(0, n) === b.slice(0, n);
+}
+
+/**
+ * Read the closed poll and return per-answer vote counts keyed by Discord answer
+ * id AND by normalized answer text. Force-refetches the message so voteCount is
+ * authoritative (a cached message carries stale/zero counts around close), and
+ * falls back to fetchVoters().size when voteCount is null/0 on a finalized poll.
+ *
+ * Returns: { resolved, byId:{id:count}, byNorm:[{norm,count,id}], byText (legacy),
+ *            answerCount, finalized }
  */
 async function fetchPollCounts(client, wf) {
   try {
     const channel = await client.channels.fetch(wf.pollChannelId).catch(() => null);
-    if (!channel) return { resolved: false };
-    const msg = await channel.messages.fetch(wf.pollMessageId).catch(() => null);
+    if (!channel || typeof channel.messages?.fetch !== 'function') return { resolved: false };
+
+    // FORCE refetch — cached message carries stale/zero voteCounts around close.
+    let msg = await channel.messages
+      .fetch({ message: wf.pollMessageId, force: true })
+      .catch(() => null);
+    // Fallback to a plain fetch if the forced variant is unsupported/errored.
+    if (!msg) msg = await channel.messages.fetch(wf.pollMessageId).catch(() => null);
     if (!msg || !msg.poll) return { resolved: false };
+
     const poll = msg.poll;
-    const finalized = poll.resultsFinalized === true || (poll.expiresTimestamp && Date.now() >= poll.expiresTimestamp);
-    if (!finalized) return { resolved: false };
+    const finalized =
+      poll.resultsFinalized === true ||
+      (poll.expiresTimestamp && Date.now() >= poll.expiresTimestamp);
+    // Only resolve a finalized poll — pre-close counts are not authoritative.
+    if (!finalized) return { resolved: false, finalized: false };
+
     const answers = [...poll.answers.values()];
-    const byId = {}; const byText = {};
+    const byId = {};
+    const byNorm = [];
+    const byText = {}; // legacy v1 back-compat (processLegacyV1 keys on exact trimmed text)
+
     for (const a of answers) {
-      const count = a.voteCount ?? a.votes?.cache?.size ?? 0;
+      let count = (typeof a.voteCount === 'number') ? a.voteCount : null;
+
+      // Fallback: voteCount null/0 on a finalized poll → count actual voters.
+      if (count == null || count === 0) {
+        try {
+          if (typeof a.fetchVoters === 'function') {
+            const voters = await a.fetchVoters();
+            const size = voters?.size ?? (Array.isArray(voters) ? voters.length : 0);
+            if (size > (count || 0)) count = size;
+          }
+        } catch (ve) {
+          console.warn('[voteWatcher] fetchVoters fallback failed for answer', a.id, ve.message);
+        }
+      }
+      count = count || 0;
+
       byId[String(a.id)] = count;
-      byText[String(a.text || a.answer || '').trim()] = count;
+      // text/answer differ across djs minor versions; emoji lives on a.emoji
+      byNorm.push({ norm: normalizeAnswerText(a.text ?? a.answer ?? ''), count, id: String(a.id) });
+      byText[String(a.text ?? a.answer ?? '').trim()] = count;
     }
-    return { resolved: true, byId, byText, answerCount: answers.length };
+
+    return { resolved: true, finalized: true, byId, byNorm, byText, answerCount: answers.length };
   } catch (e) {
     console.warn('[voteWatcher] fetchPollCounts error:', e.message);
     return { resolved: false };
@@ -139,6 +204,11 @@ async function processWorkflow(ctx, wf) {
   // --- tie_pending: nothing to do; host tap or the tie_safety_net job resolves it ---
   if (wf.status === 'tie_pending') return;
 
+  // --- tie_runoff: the runoff poll job hasn't posted yet. The scheduler picks up
+  // the runoff_<id> 'poll' job within ~30s and flips status to 'vote_open' (where
+  // the normal close path resolves it). Nothing to do here — avoids double-spawn. ---
+  if (wf.status === 'tie_runoff') return;
+
   // --- vote closed? ---
   if (wf.status === 'vote_open' || wf.status === 'awaiting_results') {
     if (!wf.pollMessageId || !wf.pollChannelId) return;
@@ -147,15 +217,24 @@ async function processWorkflow(ctx, wf) {
 
     // v2 structured path
     if (Array.isArray(wf.options) && wf.options.length) {
+      const countForOption = (o) => {
+        // 1) authoritative: Discord answer id
+        if (o.discordAnswerId != null && counts.byId[String(o.discordAnswerId)] != null) {
+          return counts.byId[String(o.discordAnswerId)];
+        }
+        // 2) robust normalized-text match (strips emoji/case/ws, tolerates 55-char truncation)
+        const hit = (counts.byNorm || []).find((b) => normalizedTextMatch(o.label, b.norm));
+        return hit ? hit.count : 0;
+      };
       const engOptions = wf.options.map((o) => ({
         ...o,
         startAtUtc: tsToDate(o.startAtUtc, o.isoDate),
-        voteCount: counts.byId[String(o.discordAnswerId)] ?? counts.byText[String(o.label || '').trim()] ?? 0,
+        voteCount: countForOption(o),
       }));
       // Sanity: counts should map to our options; if Discord returned a different
       // answer set, surface it rather than silently mispicking.
       if (counts.answerCount && counts.answerCount !== wf.options.length) {
-        await surfaceFailure(ctx, { workflowId: wf.id, scope: 'poll', level: 'warning', message: `Poll answer count (${counts.answerCount}) != option count (${wf.options.length}); mapped by id/text.` });
+        await surfaceFailure(ctx, { workflowId: wf.id, scope: 'poll', level: 'warning', message: `Poll answer count (${counts.answerCount}) != option count (${wf.options.length}); mapped by id/normalized-text.` });
       }
       const optionsForWrite = wf.options.map((o, i) => ({ ...o, voteCount: engOptions[i].voteCount }));
       const res = engine.resolveWinningOption(engOptions);
@@ -180,36 +259,95 @@ async function processWorkflow(ctx, wf) {
   }
 }
 
+/**
+ * Tie handler.
+ *   Round 1 tie/empty  -> post a fresh 24h Discord runoff poll of ONLY the tied
+ *                         options (PRIMARY mechanism), AND keep host-pick buttons
+ *                         as an optional manual shortcut.
+ *   Round 2 tie/empty  -> no more runoffs: auto-pick earliestOf the tied options.
+ */
 async function handleTie(ctx, wf, optionsForWrite, engOptions, res) {
   const { db } = ctx;
   const wfRef = db.collection('vote_workflows').doc(wf.id);
   const tiedEng = engOptions.filter((o) => res.tiedOptionIds.includes(o.id));
   const voteCloseAt = tsToDate(wf.voteCloseAt, wf.voteCloseAt) || new Date();
-  const tieDeadlineAt = engine.computeTieDeadline({ voteCloseAt, tiedOptions: tiedEng, graceHours: wf.tieGraceHours || 12, bufferHours: wf.bufferHours || 48 });
 
+  // If we are ALREADY in a runoff (round >= 2), do NOT spawn another — auto-pick earliest.
+  if ((wf.round || 1) >= 2 || wf.status === 'tie_runoff') {
+    const winner = engine.earliestOf(tiedEng);
+    await wfRef.update({
+      status: 'generating', options: optionsForWrite,
+      winnerOptionId: winner.id, firstHandAt: Timestamp.fromDate(winner.startAtUtc),
+      winningLabel: winner.label, winningWeekday: winner.weekday,
+      computedFirstHandUtc: Timestamp.fromDate(winner.startAtUtc),
+      tieResolvedBy: 'runoff_auto_earliest', tieResolvedAt: FieldValue.serverTimestamp(),
+    });
+    await ctx.writeLog('vote_closed', `Runoff for ${wf.id.slice(0, 6)} ${res.isEmpty ? 'got no votes' : 'tied again'}; auto-picked earliest: ${winner.label}.`, { workflowId: wf.id });
+    return generateAndPostApproval(ctx, {
+      ...wf, status: 'generating', winningLabel: winner.label, winningWeekday: winner.weekday,
+      computedFirstHandUtc: { toDate: () => winner.startAtUtc },
+    });
+  }
+
+  // ----- Round 1: spawn a 24h runoff poll of the tied options -----
+  const { pollData, options: runoffOptions, runoffOptionIds } =
+    engine.buildRunoffPoll(tiedEng, { durationHours: 24, titlePrefix: '🟰 TIE BREAKER — 24h runoff' });
+
+  const runoffEndsAt = new Date(Date.now() + 24 * 3600 * 1000); // provisional; sendPoll overwrites from real poll
+
+  // (a) flip the workflow into runoff state. The runoff options become the ACTIVE
+  // option set so the existing close path resolves the winner from runoff counts.
   await wfRef.update({
-    status: 'tie_pending', options: optionsForWrite,
-    tiedOptionIds: res.tiedOptionIds, tieResolvedBy: null,
-    tieDeadlineAt: Timestamp.fromDate(tieDeadlineAt),
+    status: 'tie_runoff',
+    round: 2,
+    options: runoffOptions,                 // active set = tied options only
+    parentOptions: optionsForWrite,         // keep round-1 results for the record
+    parentVoteCloseAt: Timestamp.fromDate(voteCloseAt),
+    runoffOptionIds,
+    tiedOptionIds: res.tiedOptionIds,
     tieIsEmpty: !!res.isEmpty,
+    runoffEndsAt: Timestamp.fromDate(runoffEndsAt),
+    tieResolvedBy: null,
+    pollMessageId: null,                    // sendPoll sets the new poll's id + real close
+    runoffStartedAt: FieldValue.serverTimestamp(),
   });
 
-  // idempotent safety-net job
+  // (b) enqueue the runoff poll. sendPoll posts it AND advances the workflow back
+  // to vote_open (writing new pollMessageId / pollChannelId / discordAnswerId /
+  // voteCloseAt) via its existing job.workflowId branch.
+  await db.collection('scheduled_jobs').doc(`runoff_${wf.id}`).set({
+    type: 'poll',
+    channelId: wf.pollChannelId,
+    channelName: wf.pollChannelName || wf.reminderChannelName || null,
+    pollData,
+    workflowId: wf.id,
+    scheduledFor: Timestamp.now(),          // fire on next scheduler tick (~30s)
+    status: 'pending', createdAt: FieldValue.serverTimestamp(), sentAt: null, error: null,
+  }, { merge: false });
+
+  // (c) FINAL safety net: if the runoff also ties/empties at ITS close and the
+  // watcher is offline, this timer auto-picks earliest. handleTieSafetyNet is
+  // runoff-aware (scheduler.js guard broadened to tie_pending/tie_runoff/vote_open).
+  // Fire ~30m AFTER the runoff is due to close — NOT clamped by the game buffer
+  // (which would land before the runoff even ends and consume the net early).
+  const tieDeadlineAt = new Date(runoffEndsAt.getTime() + 30 * 60 * 1000);
   await db.collection('scheduled_jobs').doc(`tiesafety_${wf.id}`).set({
     type: 'tie_safety_net', workflowId: wf.id,
     scheduledFor: Timestamp.fromDate(tieDeadlineAt),
     status: 'pending', createdAt: FieldValue.serverTimestamp(), sentAt: null, error: null,
   });
 
+  // (d) OPTIONAL manual shortcut: host can still tap a date to skip the 24h wait.
   const noun = res.isEmpty ? 'No votes came in' : `It's a tie (${res.maxVotes} each)`;
   await postCard(ctx, wf, {
-    header: `🟰 **POKER NIGHT — TIE BREAK NEEDED**\n${noun}. Tap the winning date below.\n` +
-            `If nobody picks by ${new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' }).format(tieDeadlineAt)} CT, I'll auto-pick the earliest.\n` +
+    header: `🟰 **POKER NIGHT — TIE → 24h RUNOFF**\n${noun}. I just posted a fresh **24-hour runoff poll** in <#${wf.pollChannelId}> with only the tied dates.\n` +
+            `Let it ride, or tap a date below to call it now.\n` +
             `Workflow: \`${wf.id}\``,
     components: buildTiePickComponents(wf.id, tiedEng),
     fieldKey: 'tieCardMessageId',
   });
-  await ctx.writeLog('vote_closed', `Vote ${wf.id.slice(0, 6)} ${res.isEmpty ? 'got no votes' : 'tied'}; posted tie-break card (${res.tiedOptionIds.length} options).`, { workflowId: wf.id });
+
+  await ctx.writeLog('vote_closed', `Vote ${wf.id.slice(0, 6)} ${res.isEmpty ? 'got no votes' : 'tied'}; launched 24h runoff (${runoffOptionIds.length} options).`, { workflowId: wf.id });
 }
 
 async function processLegacyV1(ctx, wf, counts) {
