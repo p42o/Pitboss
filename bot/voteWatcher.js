@@ -418,6 +418,22 @@ async function generateAndPostApproval(ctx, wf) {
     generatedAt: FieldValue.serverTimestamp(),
   });
 
+  // ---- hands-free path: auto-approve (per-workflow flag, falling back to the
+  // global setting). On any validation failure we fall through to the normal
+  // approval card so a human can sort it out. ----
+  const autoApprove = wf.autoApprove === true || (wf.autoApprove == null && settings.autoApprove === true);
+  if (autoApprove) {
+    const done = await tryAutoApprove(ctx, { ...wf, generatedAnnouncementText: announcementText, generatedImageUrl: imageUrl }, firstHandDate)
+      .catch(async (e) => { await surfaceFailure(ctx, { workflowId: wf.id, scope: 'auto_approve', level: 'warning', message: `Auto-approve failed (${e.message}); posting the approval card instead.` }); return false; });
+    if (done) {
+      const header = `✅ **POKER NIGHT — AUTO-APPROVED (hands-free)**\n` +
+        `Winner: **${wf.winningLabel || 'unknown'}** — first hand (CT): ${new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'short' }).format(firstHandDate)}\n` +
+        `Announcement is posting now; reminders are scheduled. Edit or cancel any of it from the Command Center.\n\n${announcementText}`;
+      await postCard(ctx, wf, { header, components: [], imageUrl, imageBuffer, fieldKey: 'approvalMessageId', statusLog: 'approved' });
+      return;
+    }
+  }
+
   const header = `⏳ **POKER NIGHT — APPROVAL NEEDED**\n` +
     `Winner: **${wf.winningLabel || wf.winningWeekday || 'unknown'}**\n` +
     `First hand (CT): ${new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'short' }).format(firstHandDate)}\n` +
@@ -426,13 +442,80 @@ async function generateAndPostApproval(ctx, wf) {
   await postCard(ctx, wf, { header, components: [buildApprovalRow(wf.id)], imageUrl, imageBuffer, fieldKey: 'approvalMessageId', statusLog: 'approval_pending' });
 }
 
+// Same copy the pn-approve button uses (index.js) — kept in sync.
+function reminderTextForOffset(offsetMinutes, gameTime, tableOpenTime) {
+  const fh = gameTime || '7:30 PM CT';
+  const fhShort = fh.replace(' CT', '');
+  const to = (tableOpenTime || '7:00 PM CT').replace(' CT', '');
+  if (offsetMinutes >= 1440) return `🃏 Poker night is tomorrow at ${fh}! Hope to see everyone at the tables. 🂡`;
+  if (offsetMinutes >= 180) return `🎰 Heads up — Poker Night is in a few hours. First hand at ${fh}. Get your chips ready. ♠️`;
+  if (offsetMinutes >= 45) return `♣️ Poker Night is in about an hour — table opens at ${to}, first hand at ${fhShort}.`;
+  return `🂡 ${offsetMinutes} minutes out! Table opens at ${to} — first hand at ${fhShort}. @everyone don't be late! ♣️`;
+}
+
+/**
+ * Hands-free approval. Mirrors the pn-approve button invariants exactly:
+ * first hand must be in the future AND after the vote closed; never
+ * double-enqueues. Returns true when the workflow was approved + jobs queued.
+ */
+async function tryAutoApprove(ctx, wf, firstHandDate) {
+  const { db } = ctx;
+  const wfRef = db.collection('vote_workflows').doc(wf.id);
+  const now = new Date();
+  if (!firstHandDate || isNaN(+firstHandDate)) return false;
+  const voteCloseDate = wf.voteCloseAt && wf.voteCloseAt.toDate ? wf.voteCloseAt.toDate() : null;
+  if (firstHandDate <= now || (voteCloseDate && firstHandDate <= voteCloseDate)) return false;
+  if (!wf.announceChannelId) return false;
+
+  const existing = await db.collection('scheduled_jobs').where('workflowId', '==', wf.id).get();
+  if (existing.docs.some((d) => ['announcement', 'reminder'].includes(d.data().type))) {
+    await wfRef.update({ status: 'approved', approvedAt: FieldValue.serverTimestamp(), approvedBy: 'autopilot', approvedSource: 'auto' });
+    return true;
+  }
+
+  await db.collection('scheduled_jobs').add({
+    type: 'announcement', channelId: wf.announceChannelId, channelName: wf.announceChannelName || 'announcements',
+    content: wf.generatedAnnouncementText, imageUrl: wf.generatedImageUrl || null,
+    scheduledFor: Timestamp.now(), status: 'pending',
+    createdAt: FieldValue.serverTimestamp(), workflowId: wf.id, sentAt: null, error: null,
+  });
+  const offsets = wf.reminderOffsets || engine.DEFAULT_REMINDER_OFFSETS;
+  const plan = engine.planReminders({ firstHandAt: firstHandDate, now, offsetsMinutes: offsets });
+  const remCh = wf.reminderChannelId || wf.announceChannelId;
+  const remName = wf.reminderChannelName || wf.announceChannelName || 'announcements';
+  for (const s of plan.scheduled) {
+    await db.collection('scheduled_jobs').add({
+      type: 'reminder', channelId: remCh, channelName: remName,
+      content: reminderTextForOffset(s.offsetMinutes, wf.gameTime, wf.tableOpenTime), offsetMinutes: s.offsetMinutes,
+      scheduledFor: Timestamp.fromDate(s.fireAt), status: 'pending',
+      createdAt: FieldValue.serverTimestamp(), workflowId: wf.id, sentAt: null, error: null,
+    });
+  }
+  const reminderResults = [
+    ...plan.scheduled.map((s) => ({ offsetMinutes: s.offsetMinutes, status: 'scheduled', fireAt: Timestamp.fromDate(s.fireAt) })),
+    ...plan.skipped.map((s) => ({ offsetMinutes: s.offsetMinutes, status: 'skipped', reason: s.reason })),
+  ];
+  await wfRef.update({
+    status: 'approved', approvedAt: FieldValue.serverTimestamp(), approvedBy: 'autopilot', approvedSource: 'auto',
+    reminderResults, hasSkippedReminders: plan.skipped.length > 0,
+  });
+  if (plan.skipped.length) {
+    await surfaceFailure(ctx, { workflowId: wf.id, scope: 'reminders', level: 'warning', message: `${plan.skipped.length} reminder(s) skipped (too close to game time): ${plan.skipped.map((s) => s.offsetMinutes + 'm').join(', ')}.` });
+  }
+  await ctx.writeLog('approved', `Workflow ${wf.id.slice(0, 6)} AUTO-approved — announcement + ${plan.scheduled.length} reminder(s) queued.`, { workflowId: wf.id });
+  return true;
+}
+
 /** Shared card poster (approval / tie). Resolves the approval channel + persists the message id. */
 async function postCard(ctx, wf, { header, components, imageUrl, imageBuffer, fieldKey, statusLog }) {
   const { client, db } = ctx;
   const settings = ctx.settings || (await db.collection('settings').doc('config').get()).data() || {};
-  const approvalChannelId = wf.approvalChannelId || settings.approvalChannelId;
+  // Fall back so the approval/tie card still lands somewhere if no approval channel is
+  // set: test channel (admin-ish) → announce channel. (You can also approve from the
+  // Command Center's Autopilot card, which needs no channel at all.)
+  const approvalChannelId = wf.approvalChannelId || settings.approvalChannelId || settings.testChannelId || wf.announceChannelId;
   if (!approvalChannelId) {
-    return surfaceFailure(ctx, { workflowId: wf.id, scope: 'approval', level: 'error', message: 'No approvalChannelId configured; cannot post card.' });
+    return surfaceFailure(ctx, { workflowId: wf.id, scope: 'approval', level: 'error', message: 'No approval/test/announce channel configured; cannot post card. Approve from the Command Center instead.' });
   }
   let channel;
   try { channel = await client.channels.fetch(approvalChannelId); } catch (e) {

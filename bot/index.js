@@ -4,6 +4,7 @@ const admin = require('firebase-admin');
 const { startScheduler } = require('./scheduler');
 const { startVoteWatcher } = require('./voteWatcher');
 const { startServerStats } = require('./serverStats.cjs');
+const { startAutopilot } = require('./autopilot.cjs');
 const { handleMention } = require('./conversational.cjs');
 const engine = require('./lib/scheduleEngine.cjs');
 const { surfaceFailure } = require('./lib/failures.cjs');
@@ -67,6 +68,7 @@ client.once('ready', async () => {
   startVoteWatcher(client, db, writeLog);
   startHeartbeat(tag);
   startServerStats(client, db, writeLog);
+  startAutopilot(client, db, writeLog);
   await cleanupStalePendingCommands();
   await cleanupOldDocuments();
   startCommandWatcher();
