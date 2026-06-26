@@ -292,10 +292,23 @@ async function sendAnnouncement(client, job, writeLog) {
  */
 async function sendTableLive(client, job, writeLog) {
   if (!job.channelId) throw new Error('No channelId on table_live job');
-  if (!job.content) throw new Error('No content on table_live job');
 
   const channel = await client.channels.fetch(job.channelId);
   if (!channel) throw new Error(`Channel ${job.channelId} not found`);
+
+  // Resolve the message. A manual "Go Live now" bakes the link into job.content;
+  // an auto-post job carries no content and instead reads the link the host
+  // dropped on the workflow during the day, live at fire time. If the host
+  // never set a link, surface a failure (and DON'T post a broken message).
+  let content = job.content;
+  if (!content && job.workflowId) {
+    const db = admin.firestore();
+    const snap = await db.collection('vote_workflows').doc(job.workflowId).get();
+    const link = snap.exists ? (snap.data().tableLink || '') : '';
+    if (!link) throw new Error('Table auto-post fired but no PokerNow link was set in the Command Center. Open the table and post the link manually.');
+    content = `🎲 **The table is LIVE!** Join here: ${link}`;
+  }
+  if (!content) throw new Error('No content on table_live job');
 
   // Move channel to active category (The Pit) — syncs category permissions
   if (job.activeCategoryId) {
@@ -309,7 +322,17 @@ async function sendTableLive(client, job, writeLog) {
     }
   }
 
-  await channel.send({ content: job.content });
+  await channel.send({ content });
+
+  // Advance the workflow so the Command Center reflects "live" (the manual
+  // path already does this client-side; the auto path needs it server-side).
+  if (job.workflowId) {
+    try {
+      await admin.firestore().collection('vote_workflows').doc(job.workflowId).update({
+        status: 'table_live', wentLiveAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (_) {}
+  }
 }
 
 function capitalize(s) {

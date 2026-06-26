@@ -8,6 +8,7 @@ const { startAutopilot } = require('./autopilot.cjs');
 const { handleMention } = require('./conversational.cjs');
 const engine = require('./lib/scheduleEngine.cjs');
 const { surfaceFailure } = require('./lib/failures.cjs');
+const { scheduleDayOfJobs } = require('./lib/dayOf.cjs');
 
 // ==================== FIREBASE INIT ====================
 const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -498,7 +499,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await surfaceFailure({ db, client, writeLog, settings }, { workflowId, scope: 'reminders', level: 'warning', message: `${plan.skipped.length} reminder(s) skipped (too close to game time): ${plan.skipped.map((s) => s.offsetMinutes + 'm').join(', ')}.` });
       }
       const skipNote = plan.skipped.length ? ` (${plan.skipped.length} skipped — too close)` : '';
-      await interaction.update({ content: `✅ **APPROVED** — announcement sending now; ${plan.scheduled.length} reminder(s) scheduled${skipNote}.`, components: [] });
+
+      // Day-of table automation: morning link nudge + reserved game-time auto-post.
+      let dayOfNote = '';
+      try {
+        const settings = (await db.collection('settings').doc('config').get()).data() || {};
+        const r = await scheduleDayOfJobs(db, { ...wf, id: workflowId }, firstHandDate, settings);
+        if (r.autoPost) dayOfNote = `\n🔗 I'll auto-post the PokerNow link${r.nudge ? ' (and nudge you that morning)' : ''} — just drop it in the Command Center.`;
+      } catch (e) {
+        await surfaceFailure({ db, client, writeLog, settings: {} }, { workflowId, scope: 'table_auto', level: 'warning', message: `Couldn't schedule the day-of table automation: ${e.message}. Go Live manually from the Command Center.` });
+      }
+
+      await interaction.update({ content: `✅ **APPROVED** — announcement sending now; ${plan.scheduled.length} reminder(s) scheduled${skipNote}.${dayOfNote}`, components: [] });
       await writeLog('approved', `Workflow ${workflowId.slice(0, 6)} approved by ${interaction.user.tag}.`, { workflowId });
 
     } else if (action === 'pn-decline') {

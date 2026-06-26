@@ -65,6 +65,24 @@ function ctOffsetString(utcInstant) {
   return `${m[1]}${pad2(parseInt(m[2], 10))}:${m[3] || '00'}`;
 }
 
+/** The CT calendar parts {year, month, day} for a UTC instant. */
+function ctDateParts(utcInstant) {
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(utcInstant);
+  const g = (t) => +p.find((x) => x.type === t).value;
+  return { year: g('year'), month: g('month'), day: g('day') };
+}
+
+/**
+ * The true UTC instant for hour:min CT *on the same CT calendar day* as the
+ * given reference instant. Used to compute the morning link-nudge and the
+ * day-of table auto-post relative to the first-hand time. DST-correct.
+ */
+function sameDayCtTimeUtc(refUtcInstant, hour, min) {
+  const { year, month, day } = ctDateParts(refUtcInstant);
+  return ctWallClockToUtc(year, month, day, hour, min);
+}
+
 /** Offset-aware ISO string for a CT wall clock, e.g. "2026-06-04T19:30:00-05:00". */
 function ctIsoString(year, month, day, hour, min) {
   const utc = ctWallClockToUtc(year, month, day, hour, min);
@@ -275,7 +293,7 @@ function buildRunoffPoll(tiedOptions, opts = {}) {
 
 const api = {
   TZ, WEEKDAY_NAMES, MONTH_NAMES, DEFAULT_REMINDER_OFFSETS,
-  parseClockTime, ctWallClockToUtc, ctOffsetString, ctIsoString,
+  parseClockTime, ctWallClockToUtc, ctOffsetString, ctIsoString, ctDateParts, sameDayCtTimeUtc,
   nextMonthOf, getCandidateDates, buildOptionLabel, buildPollOptions,
   earliestOf, planVoteWindow, replanDroppingEarliest, planReminders,
   resolveWinningOption, computeTieDeadline, buildRunoffPoll,

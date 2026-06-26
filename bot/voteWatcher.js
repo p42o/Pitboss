@@ -11,6 +11,7 @@ const { generateAnnouncementImage } = require('./imageGen');
 const { uploadToImgur } = require('./imgur');
 const engine = require('./lib/scheduleEngine.cjs');
 const { surfaceFailure } = require('./lib/failures.cjs');
+const { scheduleDayOfJobs } = require('./lib/dayOf.cjs');
 
 const POLL_INTERVAL_MS = 60 * 1000; // check every 60s
 const { Timestamp, FieldValue } = admin.firestore;
@@ -502,7 +503,18 @@ async function tryAutoApprove(ctx, wf, firstHandDate) {
   if (plan.skipped.length) {
     await surfaceFailure(ctx, { workflowId: wf.id, scope: 'reminders', level: 'warning', message: `${plan.skipped.length} reminder(s) skipped (too close to game time): ${plan.skipped.map((s) => s.offsetMinutes + 'm').join(', ')}.` });
   }
-  await ctx.writeLog('approved', `Workflow ${wf.id.slice(0, 6)} AUTO-approved — announcement + ${plan.scheduled.length} reminder(s) queued.`, { workflowId: wf.id });
+
+  // Day-of table automation: morning link nudge + reserved 7:30 PM auto-post.
+  let dayOfNote = '';
+  try {
+    const settings = ctx.settings || (await db.collection('settings').doc('config').get()).data() || {};
+    const r = await scheduleDayOfJobs(db, wf, firstHandDate, settings);
+    if (r.autoPost || r.nudge) dayOfNote = ` + table auto-open (${[r.nudge && 'morning nudge', r.autoPost && 'auto-post'].filter(Boolean).join(' + ')})`;
+  } catch (e) {
+    await surfaceFailure(ctx, { workflowId: wf.id, scope: 'table_auto', level: 'warning', message: `Couldn't schedule the day-of table automation: ${e.message}. Go Live manually from the Command Center.` });
+  }
+
+  await ctx.writeLog('approved', `Workflow ${wf.id.slice(0, 6)} AUTO-approved — announcement + ${plan.scheduled.length} reminder(s) queued${dayOfNote}.`, { workflowId: wf.id });
   return true;
 }
 
