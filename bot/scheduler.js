@@ -310,7 +310,8 @@ async function sendTableLive(client, job, writeLog) {
   }
   if (!content) throw new Error('No content on table_live job');
 
-  // Move channel to active category (The Pit) — syncs category permissions
+  // Move channel to the active category (next to riff-room) so it inherits that
+  // category's open perms.
   if (job.activeCategoryId) {
     try {
       await channel.setParent(job.activeCategoryId, { lockPermissions: true });
@@ -320,6 +321,17 @@ async function sendTableLive(client, job, writeLog) {
       await writeLog('warning', `Table channel move failed: ${moveErr.message}`, {});
       // Still post the message even if move fails
     }
+  }
+  // EXPOSE it deterministically. Don't trust lock_permissions alone — Discord only
+  // re-syncs on a real parent change and it's rate-limit sensitive. The parked/
+  // resting state hides the channel with an @everyone ViewChannel deny; clear that
+  // overwrite so the channel inherits the (visible) category, matching riff-room.
+  try {
+    await channel.permissionOverwrites.delete(channel.guild.id, 'Poker night — expose the join-the-table channel');
+    console.log(`[Scheduler] Exposed #${channel.name} (cleared @everyone view-deny).`);
+  } catch (expErr) {
+    console.warn('[Scheduler] Expose (perm clear) failed:', expErr.message);
+    await writeLog('warning', `Table channel expose failed: ${expErr.message}`, {});
   }
 
   await channel.send({ content });
