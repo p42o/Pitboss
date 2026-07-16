@@ -74,6 +74,8 @@ async function processJob(client, db, writeLog, job, docRef) {
       await sendAnnouncement(client, job, writeLog);
     } else if (job.type === 'table_live') {
       await sendTableLive(client, job, writeLog);
+    } else if (job.type === 'table_hide') {
+      await hideTableChannel(client, job, writeLog);
     } else {
       throw new Error(`Unknown job type: ${job.type}`);
     }
@@ -343,6 +345,72 @@ async function sendTableLive(client, job, writeLog) {
       await admin.firestore().collection('vote_workflows').doc(job.workflowId).update({
         status: 'table_live', wentLiveAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+    } catch (_) {}
+  }
+
+  // Auto-close the loop: queue a table_hide for midnight CT ending game night
+  // (00:00 CT the day after first hand) — re-parks + re-hides the join channel
+  // so next month's reveal is a real reveal. Runs for scheduled AND "Go Live now".
+  try {
+    const db = admin.firestore();
+    let firstHand = null;
+    if (job.workflowId) {
+      const w = (await db.collection('vote_workflows').doc(job.workflowId).get()).data() || {};
+      firstHand = (w.firstHandAt && w.firstHandAt.toDate && w.firstHandAt.toDate())
+        || (w.computedFirstHandUtc && w.computedFirstHandUtc.toDate && w.computedFirstHandUtc.toDate()) || null;
+    }
+    const gp = engine.ctDateParts(firstHand || new Date());
+    const hideAt = engine.ctWallClockToUtc(gp.year, gp.month, gp.day + 1, 0, 0); // day+1 rolls months over safely
+    if (hideAt.getTime() > Date.now()) {
+      // De-dupe: don't stack hides if the table somehow goes live more than once.
+      let exists = false;
+      if (job.workflowId) {
+        const prior = await db.collection('scheduled_jobs')
+          .where('workflowId', '==', job.workflowId).where('type', '==', 'table_hide').get();
+        exists = prior.docs.some((d) => ['pending', 'processing'].includes(d.data().status));
+      }
+      if (!exists) {
+        const cfg = (await db.doc('settings/config').get()).data() || {};
+        await db.collection('scheduled_jobs').add({
+          type: 'table_hide', channelId: job.channelId, channelName: job.channelName || '',
+          inactiveCategoryId: cfg.inactiveCategoryId || job.inactiveCategoryId || null,
+          workflowId: job.workflowId || null, scheduledFor: admin.firestore.Timestamp.fromDate(hideAt),
+          status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          sentAt: null, error: null, source: 'auto_table_hide',
+        });
+        console.log(`[Scheduler] Queued table_hide for ${hideAt.toISOString()} (midnight CT).`);
+      }
+    }
+  } catch (hideErr) {
+    console.warn('[Scheduler] Failed to queue table_hide:', hideErr.message);
+    await writeLog('warning', `Could not queue midnight table hide: ${hideErr.message}`, {});
+  }
+}
+
+/**
+ * Re-hide the join-the-table channel: move it back to the inactive category
+ * (if configured) and deny @everyone ViewChannel. Deterministic — sets the
+ * overwrite explicitly rather than trusting lock_permissions.
+ */
+async function hideTableChannel(client, job, writeLog) {
+  if (!job.channelId) throw new Error('No channelId on table_hide job');
+  const channel = await client.channels.fetch(job.channelId);
+  if (!channel) throw new Error(`Channel ${job.channelId} not found`);
+  if (job.inactiveCategoryId) {
+    try {
+      await channel.setParent(job.inactiveCategoryId, { lockPermissions: false });
+      console.log(`[Scheduler] Re-parked #${channel.name} in the inactive category.`);
+    } catch (moveErr) {
+      console.warn('[Scheduler] Hide move failed:', moveErr.message);
+      await writeLog('warning', `Table hide move failed: ${moveErr.message}`, {});
+    }
+  }
+  await channel.permissionOverwrites.edit(channel.guild.id, { ViewChannel: false }, { reason: 'Poker night over — re-hide join-the-table' });
+  console.log(`[Scheduler] Hid #${channel.name} (denied @everyone view).`);
+  if (job.workflowId) {
+    try {
+      await admin.firestore().collection('vote_workflows').doc(job.workflowId)
+        .update({ tableHiddenAt: admin.firestore.FieldValue.serverTimestamp() });
     } catch (_) {}
   }
 }
