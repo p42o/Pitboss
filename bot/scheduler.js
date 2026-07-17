@@ -4,6 +4,48 @@ const engine = require('./lib/scheduleEngine.cjs');
 
 const POLL_INTERVAL_MS = 30 * 1000; // 30 seconds
 
+// Guards against overlapping ticks (a slow tick still running when the next
+// 30s interval fires) causing the same due job to be picked up twice.
+let _running = false;
+
+/**
+ * Recover jobs stranded in 'processing' by a prior crash. Single bot
+ * instance, so anything still 'processing' at startup is an orphan, not a
+ * job actively being worked by another process.
+ */
+async function recoverStuckJobs(db, writeLog, client) {
+  let snapshot;
+  try {
+    snapshot = await db.collection('scheduled_jobs').where('status', '==', 'processing').get();
+  } catch (err) {
+    console.error('[Scheduler] recoverStuckJobs query error:', err.message);
+    return;
+  }
+  if (snapshot.empty) return;
+
+  console.log(`[Scheduler] Recovering ${snapshot.size} stuck job(s) from a prior crash.`);
+  for (const docSnap of snapshot.docs) {
+    const job = { id: docSnap.id, ...docSnap.data() };
+    const attempts = job.attempts || 0;
+    try {
+      if (attempts >= 3) {
+        await docSnap.ref.update({ status: 'failed', error: 'Orphaned in processing at startup (max attempts exceeded)' });
+        let settings = {};
+        try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
+        await surfaceFailure({ db, client, writeLog, settings }, {
+          workflowId: job.workflowId, scope: `job_${job.type}`, level: 'error',
+          message: `Job ${job.id} (${job.type}) orphaned in processing and exceeded max attempts — marked failed.`,
+          meta: { jobId: job.id },
+        });
+      } else {
+        await docSnap.ref.update({ status: 'pending', attempts: attempts + 1 });
+      }
+    } catch (e) {
+      console.error(`[Scheduler] Failed to recover stuck job ${job.id}:`, e.message);
+    }
+  }
+}
+
 /**
  * Start the Firestore job watcher.
  * Polls every 30 seconds for pending jobs where scheduledFor <= now.
@@ -13,34 +55,43 @@ function startScheduler(client, db, writeLog) {
   writeLog('connection', 'Scheduler started — polling every 30 seconds.', {});
 
   async function processDueJobs() {
-    const now = admin.firestore.Timestamp.now();
-
-    let snapshot;
+    if (_running) return; // previous tick still in flight — skip this one
+    _running = true;
     try {
-      snapshot = await db.collection('scheduled_jobs')
-        .where('status', '==', 'pending')
-        .where('scheduledFor', '<=', now)
-        .get();
-    } catch (err) {
-      console.error('[Scheduler] Firestore query error:', err.message);
-      await writeLog('error', `Scheduler query error: ${err.message}`, {});
-      return;
-    }
+      const now = admin.firestore.Timestamp.now();
 
-    if (snapshot.empty) return;
+      let snapshot;
+      try {
+        snapshot = await db.collection('scheduled_jobs')
+          .where('status', '==', 'pending')
+          .where('scheduledFor', '<=', now)
+          .get();
+      } catch (err) {
+        console.error('[Scheduler] Firestore query error:', err.message);
+        await writeLog('error', `Scheduler query error: ${err.message}`, {});
+        return;
+      }
 
-    console.log(`[Scheduler] Found ${snapshot.size} due job(s).`);
-    await writeLog('scheduled', `Processing ${snapshot.size} due job(s).`, {});
+      if (snapshot.empty) return;
 
-    for (const docSnap of snapshot.docs) {
-      const job = { id: docSnap.id, ...docSnap.data() };
-      await processJob(client, db, writeLog, job, docSnap.ref);
+      console.log(`[Scheduler] Found ${snapshot.size} due job(s).`);
+      await writeLog('scheduled', `Processing ${snapshot.size} due job(s).`, {});
+
+      for (const docSnap of snapshot.docs) {
+        const job = { id: docSnap.id, ...docSnap.data() };
+        await processJob(client, db, writeLog, job, docSnap.ref);
+      }
+    } finally {
+      _running = false;
     }
   }
 
-  // Run immediately, then on interval
-  processDueJobs();
-  setInterval(processDueJobs, POLL_INTERVAL_MS);
+  // Recover anything orphaned in 'processing' by a prior crash BEFORE the
+  // poll loop starts, then run immediately and on interval.
+  recoverStuckJobs(db, writeLog, client).finally(() => {
+    processDueJobs();
+    setInterval(processDueJobs, POLL_INTERVAL_MS);
+  });
 }
 
 /**
@@ -49,12 +100,48 @@ function startScheduler(client, db, writeLog) {
 async function processJob(client, db, writeLog, job, docRef) {
   console.log(`[Scheduler] Processing job ${job.id} (type: ${job.type})`);
 
-  // Mark as in-progress to avoid double-processing
+  const startingAttempts = job.attempts || 0;
+
+  // Transactional claim: only proceed if the job is still 'pending'. Guards
+  // against an overlapping tick or a second instance double-claiming.
   try {
-    await docRef.update({ status: 'processing' });
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(docRef);
+      if (!snap.exists || snap.data().status !== 'pending') {
+        throw new Error('ALREADY_CLAIMED');
+      }
+      tx.update(docRef, {
+        status: 'processing',
+        processingStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+        attempts: startingAttempts,
+      });
+    });
   } catch (e) {
-    console.error(`[Scheduler] Could not lock job ${job.id}:`, e.message);
+    if (e.message === 'ALREADY_CLAIMED') {
+      console.log(`[Scheduler] Job ${job.id} already claimed elsewhere; skipping.`);
+    } else {
+      console.error(`[Scheduler] Could not lock job ${job.id}:`, e.message);
+    }
     return;
+  }
+
+  // Max-age guard: after extended downtime, don't fire time-sensitive jobs
+  // long past their moment (a reminder/poll/announcement/table_live for a
+  // now-past event is worse than skipped). Cleanup/safety types are exempt.
+  const AGE_SENSITIVE_TYPES = ['reminder', 'announcement', 'table_live', 'poll'];
+  if (AGE_SENSITIVE_TYPES.includes(job.type) && job.scheduledFor && job.scheduledFor.toMillis) {
+    const lateMs = Date.now() - job.scheduledFor.toMillis();
+    if (lateMs > 60 * 60 * 1000) {
+      await docRef.update({ status: 'expired' });
+      let settings = {};
+      try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
+      await surfaceFailure({ db, client, writeLog, settings }, {
+        workflowId: job.workflowId, scope: `job_${job.type}`, level: 'warning',
+        message: `Job ${job.id} (${job.type}) expired — fired >60min late for a past event.`,
+        meta: { jobId: job.id, channelId: job.channelId || null },
+      });
+      return;
+    }
   }
 
   try {
@@ -107,15 +194,29 @@ async function processJob(client, db, writeLog, job, docRef) {
   } catch (err) {
     console.error(`[Scheduler] Job ${job.id} failed:`, err.message);
 
-    await docRef.update({ status: 'failed', error: err.message });
+    if (startingAttempts < 3) {
+      // Retry with exponential backoff. Bounded — if the backoff pushes it
+      // far enough behind, the max-age check above will expire it instead
+      // of firing something stale.
+      const nextAttempts = startingAttempts + 1;
+      const backoffMs = Math.pow(2, startingAttempts) * 60 * 1000;
+      await docRef.update({
+        status: 'pending',
+        attempts: nextAttempts,
+        scheduledFor: admin.firestore.Timestamp.fromMillis(Date.now() + backoffMs),
+        error: err.message,
+      });
+    } else {
+      await docRef.update({ status: 'failed', error: err.message });
 
-    // No silent failures — surface to Parker + the workflow's failures[].
-    let settings = {};
-    try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
-    await surfaceFailure({ db, client, writeLog, settings }, {
-      workflowId: job.workflowId, scope: `job_${job.type}`, level: 'error',
-      message: `Job ${job.id} (${job.type}) failed: ${err.message}`, meta: { jobId: job.id, channelId: job.channelId || null },
-    });
+      // No silent failures — surface to Parker + the workflow's failures[].
+      let settings = {};
+      try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
+      await surfaceFailure({ db, client, writeLog, settings }, {
+        workflowId: job.workflowId, scope: `job_${job.type}`, level: 'error',
+        message: `Job ${job.id} (${job.type}) failed: ${err.message}`, meta: { jobId: job.id, channelId: job.channelId || null },
+      });
+    }
   }
 }
 
@@ -125,29 +226,43 @@ async function processJob(client, db, writeLog, job, docRef) {
  */
 async function handleTieSafetyNet(client, db, writeLog, job) {
   const wfRef = db.collection('vote_workflows').doc(job.workflowId);
-  const snap = await wfRef.get();
-  if (!snap.exists) return;
-  const wf = snap.data();
-  // Runoff-aware: the net must catch a tie that's pending, mid-runoff-setup, or in an
-  // open runoff poll that never resolved (bot offline through it). Skip only when it's
-  // already resolved, or while a runoff poll is still open and not yet expired.
-  if (!['tie_pending', 'tie_runoff', 'vote_open'].includes(wf.status)) return; // already resolved
-  if (wf.status === 'vote_open' && wf.runoffEndsAt?.toDate && Date.now() < wf.runoffEndsAt.toDate().getTime()) return;
 
-  const tied = (wf.options || [])
-    .filter((o) => (wf.tiedOptionIds || []).includes(o.id))
-    .map((o) => ({ ...o, startAtUtc: o.startAtUtc && o.startAtUtc.toDate ? o.startAtUtc.toDate() : new Date(o.isoDate) }));
-  if (!tied.length) return;
+  // Re-check the status AND resolve inside one transaction so a concurrent
+  // voteWatcher tick can't resolve the same tie twice (race between the
+  // safety-net firing and a late vote closing the poll naturally).
+  let winner = null;
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(wfRef);
+      if (!snap.exists) return;
+      const wf = snap.data();
+      // Runoff-aware: the net must catch a tie that's pending, mid-runoff-setup, or in an
+      // open runoff poll that never resolved (bot offline through it). Skip only when it's
+      // already resolved, or while a runoff poll is still open and not yet expired.
+      if (!['tie_pending', 'tie_runoff', 'vote_open'].includes(wf.status)) return; // already resolved
+      if (wf.status === 'vote_open' && wf.runoffEndsAt?.toDate && Date.now() < wf.runoffEndsAt.toDate().getTime()) return;
 
-  const winner = engine.earliestOf(tied);
-  await wfRef.update({
-    status: 'generating',
-    winnerOptionId: winner.id,
-    firstHandAt: admin.firestore.Timestamp.fromDate(winner.startAtUtc),
-    winningLabel: winner.label, winningWeekday: winner.weekday,
-    computedFirstHandUtc: admin.firestore.Timestamp.fromDate(winner.startAtUtc),
-    tieResolvedBy: 'auto_earliest', tieResolvedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+      const tied = (wf.options || [])
+        .filter((o) => (wf.tiedOptionIds || []).includes(o.id))
+        .map((o) => ({ ...o, startAtUtc: o.startAtUtc && o.startAtUtc.toDate ? o.startAtUtc.toDate() : new Date(o.isoDate) }));
+      if (!tied.length) return;
+
+      winner = engine.earliestOf(tied);
+      tx.update(wfRef, {
+        status: 'generating',
+        winnerOptionId: winner.id,
+        firstHandAt: admin.firestore.Timestamp.fromDate(winner.startAtUtc),
+        winningLabel: winner.label, winningWeekday: winner.weekday,
+        computedFirstHandUtc: admin.firestore.Timestamp.fromDate(winner.startAtUtc),
+        tieResolvedBy: 'auto_earliest', tieResolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+  } catch (e) {
+    console.error(`[Scheduler] handleTieSafetyNet transaction failed for wf ${job.workflowId}:`, e.message);
+    return;
+  }
+  if (!winner) return; // already resolved / no tie / not our turn — nothing to surface
+
   let settings = {};
   try { settings = (await db.collection('settings').doc('config').get()).data() || {}; } catch (_) {}
   await surfaceFailure({ db, client, writeLog, settings }, {
@@ -297,6 +412,7 @@ async function sendTableLive(client, job, writeLog) {
 
   const channel = await client.channels.fetch(job.channelId);
   if (!channel) throw new Error(`Channel ${job.channelId} not found`);
+  job.channelName = channel.name; // downstream success log should report the real channel
 
   // Resolve the message. A manual "Go Live now" bakes the link into job.content;
   // an auto-post job carries no content and instead reads the link the host
@@ -329,7 +445,7 @@ async function sendTableLive(client, job, writeLog) {
   // resting state hides the channel with an @everyone ViewChannel deny; clear that
   // overwrite so the channel inherits the (visible) category, matching riff-room.
   try {
-    await channel.permissionOverwrites.delete(channel.guild.id, 'Poker night — expose the join-the-table channel');
+    await channel.permissionOverwrites.edit(channel.guild.id, { ViewChannel: null }, { reason: 'Poker night — expose the join-the-table channel' });
     console.log(`[Scheduler] Exposed #${channel.name} (cleared @everyone view-deny).`);
   } catch (expErr) {
     console.warn('[Scheduler] Expose (perm clear) failed:', expErr.message);
@@ -396,6 +512,7 @@ async function hideTableChannel(client, job, writeLog) {
   if (!job.channelId) throw new Error('No channelId on table_hide job');
   const channel = await client.channels.fetch(job.channelId);
   if (!channel) throw new Error(`Channel ${job.channelId} not found`);
+  job.channelName = channel.name; // downstream success log should report the real channel
   if (job.inactiveCategoryId) {
     try {
       await channel.setParent(job.inactiveCategoryId, { lockPermissions: false });
@@ -410,7 +527,7 @@ async function hideTableChannel(client, job, writeLog) {
   if (job.workflowId) {
     try {
       await admin.firestore().collection('vote_workflows').doc(job.workflowId)
-        .update({ tableHiddenAt: admin.firestore.FieldValue.serverTimestamp() });
+        .update({ tableHiddenAt: admin.firestore.FieldValue.serverTimestamp(), status: 'complete' });
     } catch (_) {}
   }
 }

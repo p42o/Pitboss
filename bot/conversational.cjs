@@ -167,7 +167,6 @@ function parseWhen(whenStr, now, engine) {
   if (/\bnoon\b/.test(lower)) hm = { hour: 12, min: 0 };
   if (/\bmidnight\b/.test(lower)) hm = { hour: 0, min: 0 };
   if (!hm || (!hasTimeSignal && !dayResolved)) return null;
-  if (!hm) return null;
 
   // Build the CT instant via the engine's DST-correct converter.
   if (!engine || !engine.ctWallClockToUtc) return null;
@@ -357,7 +356,7 @@ async function handleMention({ message, client, db, settings, writeLog, engine }
           : `Tell the player there is no poker game scheduled yet. Nobody has set one up.`,
         fallback,
       });
-      await message.reply(cap(line)).catch(() => {});
+      await message.reply({ content: cap(line), allowedMentions: { parse: [], repliedUser: true } }).catch(() => {});
       await log('action', `next_game → ${message.author.username}`, { user: message.author.username });
       return true;
     }
@@ -379,7 +378,7 @@ async function handleMention({ message, client, db, settings, writeLog, engine }
           : `Tell the player nothing is scheduled. The queue is empty.`,
         fallback,
       });
-      await message.reply(cap(line)).catch(() => {});
+      await message.reply({ content: cap(line), allowedMentions: { parse: [], repliedUser: true } }).catch(() => {});
       await log('action', `list_scheduled (${jobs.length}) → ${message.author.username}`, { count: jobs.length });
       return true;
     }
@@ -392,7 +391,7 @@ async function handleMention({ message, client, db, settings, writeLog, engine }
           instruction: `Tell ${message.author.username} they ain't cleared to put jobs on the board. Only the boss or guild admins schedule things. Short and cold.`,
           fallback: "You ain't cleared to put jobs on the board, pal. That's boss-only.",
         });
-        await message.reply(cap(line)).catch(() => {});
+        await message.reply({ content: cap(line), allowedMentions: { parse: [], repliedUser: true } }).catch(() => {});
         await log('warning', `Unauthorized schedule attempt by ${message.author.username}`, { user: message.author.id });
         return true;
       }
@@ -439,7 +438,7 @@ async function handleMention({ message, client, db, settings, writeLog, engine }
         instruction: `Confirm you scheduled a ${action === 'schedule_reminder' ? 'reminder' : 'message'} to post in #${ch.name} at ${ctShort(when)}. Be cool and brief. Do not change the channel or time.`,
         fallback,
       });
-      await message.reply(cap(line)).catch(() => {});
+      await message.reply({ content: cap(line), allowedMentions: { parse: [], repliedUser: true } }).catch(() => {});
       await log('action', `${action} → #${ch.name} @ ${ctShort(when)} by ${message.author.username}`, {
         channel: ch.name, when: when.toISOString(), user: message.author.id,
       });
@@ -474,7 +473,9 @@ async function readNextGame(db) {
     if (snap.empty) return null;
 
     const toDate = (v) => (v && v.toDate ? v.toDate() : (v ? new Date(v) : null));
-    let best = null;
+    const nowMs = Date.now();
+    let bestFuture = null;   // soonest first-hand still in the future (preferred)
+    let bestCreated = null;  // most-recently-created live one (fallback)
     for (const doc of snap.docs) {
       const wf = doc.data();
       if (DEAD.has(String(wf.status || '').toLowerCase())) continue;
@@ -482,12 +483,18 @@ async function readNextGame(db) {
       const created = toDate(wf.createdAt) || new Date(0);
       const cand = {
         firstHand: fh,
-        label: wf.winningLabel || (fh ? null : null),
+        label: wf.winningLabel || null,
         status: wf.status || 'pending',
         _created: created.getTime(),
+        _fh: fh ? fh.getTime() : null,
       };
-      if (!best || cand._created > best._created) best = cand;
+      // Prefer a game whose first hand is in the future; among those, the soonest.
+      if (cand._fh != null && cand._fh > nowMs) {
+        if (!bestFuture || cand._fh < bestFuture._fh) bestFuture = cand;
+      }
+      if (!bestCreated || cand._created > bestCreated._created) bestCreated = cand;
     }
+    const best = bestFuture || bestCreated;
     if (!best) return null;
     return { firstHand: best.firstHand, label: best.label, status: best.status };
   } catch (_) {

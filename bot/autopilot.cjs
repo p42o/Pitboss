@@ -17,8 +17,10 @@ const { Timestamp, FieldValue } = admin.firestore;
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // every 30 min is plenty for a monthly event
 
 function targetMonth(now = new Date()) {
-  // next calendar month (the one we'd be voting on)
-  return engine.nextMonthOf(now.getUTCFullYear(), now.getUTCMonth() + 1);
+  // next calendar month (the one we'd be voting on) — rolls at CT midnight,
+  // not UTC, so the boundary matches what players actually experience.
+  const ct = engine.ctDateParts(now);
+  return engine.nextMonthOf(ct.year, ct.month);
 }
 
 function voteOpenAt(target, daysBefore) {
@@ -101,6 +103,12 @@ async function tick(ctx) {
     return;
   }
 
+  // Deterministic poll-job id, known up front so it can be written in the
+  // SAME batch as the workflow doc — a crash between the two writes used to
+  // strand the vote forever (the doc.exists guard above would see the
+  // workflow and never retry the poll job).
+  const pollJobId = `autopoll_${wfId}`;
+
   const wf = {
     schemaVersion: 2, status: 'scheduled', month: tm.month, year: tm.year, timezone: engine.TZ,
     gameTime, tableOpenTime: settings.tableOpenTime || '7:00 PM CT', bufferHours,
@@ -116,16 +124,20 @@ async function tick(ctx) {
     approvalChannelId: settings.approvalChannelId || null,
     tableLiveChannelId: settings.tableLiveChannelId || null, activeCategoryId: settings.activeCategoryId || null,
     createdAt: FieldValue.serverTimestamp(), createdBy: 'autopilot',
+    pollJobId,
   };
-  await db.collection('vote_workflows').doc(wfId).set(wf, { merge: false });
 
   const title = `🃏 ${engine.MONTH_NAMES[tm.month - 1]} ${tm.year} Poker Night — check every date you can make 🃏`;
-  await db.collection('scheduled_jobs').doc(`autopoll_${wfId}`).set({
+  const pollJob = {
     type: 'poll', channelId: settings.pollChannelId, channelName: settings.pollChannelName || null, content: title,
     pollData: { title, options: options.map((o) => ({ text: o.label, emoji: o.emoji })), multiSelect: true, duration: Math.min(plan.pollDurationHours, 768) },
     workflowId: wfId, scheduledFor: Timestamp.now(), status: 'pending', createdAt: FieldValue.serverTimestamp(), sentAt: null, error: null,
-  }, { merge: false });
-  await db.collection('vote_workflows').doc(wfId).update({ pollJobId: `autopoll_${wfId}` });
+  };
+
+  const batch = db.batch();
+  batch.set(db.collection('vote_workflows').doc(wfId), wf, { merge: false });
+  batch.set(db.collection('scheduled_jobs').doc(pollJobId), pollJob, { merge: false });
+  await batch.commit();
 
   await ctx.writeLog('vote_open', `Autopilot opened the ${engine.MONTH_NAMES[tm.month - 1]} ${tm.year} vote (poll → #${settings.pollChannelName || settings.pollChannelId}).`, { workflowId: wfId });
 }

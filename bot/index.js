@@ -72,6 +72,8 @@ client.once('ready', async () => {
   startAutopilot(client, db, writeLog);
   await cleanupStalePendingCommands();
   await cleanupOldDocuments();
+  // Re-run cleanup daily so logs/commands don't grow unbounded across long pm2 runs.
+  setInterval(() => { cleanupOldDocuments().catch(() => {}); }, 24 * 60 * 60 * 1000);
   startCommandWatcher();
 });
 
@@ -85,17 +87,16 @@ function startHeartbeat(tag) {
         guilds: client.guilds.cache.size
       });
 
-      // Count online members across all guilds
+      // Count online members across all guilds from cache (presence/members are
+      // already cached via GuildPresences/GuildMembers intents) — no per-minute
+      // full member fetch.
       let onlineCount = 0;
       for (const guild of client.guilds.cache.values()) {
-        try {
-          const members = await guild.members.fetch();
-          onlineCount += members.filter(m =>
-            m.presence?.status === 'online' ||
-            m.presence?.status === 'idle' ||
-            m.presence?.status === 'dnd'
-          ).size;
-        } catch (_) { /* guild may not be fetchable */ }
+        onlineCount += guild.members.cache.filter(m =>
+          m.presence?.status === 'online' ||
+          m.presence?.status === 'idle' ||
+          m.presence?.status === 'dnd'
+        ).size;
       }
       await db.collection('bot_status').doc('presence').set({
         onlineCount,
@@ -191,12 +192,18 @@ function startCommandWatcher() {
             });
 
           } else if (cmd.type === 'test_send') {
-            const ch = await client.channels.fetch(cmd.payload.channelId).catch(() => null);
-            if (ch) {
+            try {
+              const ch = await client.channels.fetch(cmd.payload.channelId);
+              if (!ch || typeof ch.send !== 'function') {
+                throw new Error(`Channel ${cmd.payload.channelId} not found or not sendable.`);
+              }
               await ch.send(cmd.payload.message || '🃏 Pitboss test message ♠️');
               await writeLog('sent', `Test message sent to #${ch.name}`, {});
+              await cmdDoc.ref.update({ status: 'completed' });
+            } catch (sendErr) {
+              await cmdDoc.ref.update({ status: 'failed', error: sendErr.message });
+              await writeLog('error', `Test message failed: ${sendErr.message}`, {});
             }
-            await cmdDoc.ref.update({ status: 'completed' });
 
           } else if (cmd.type === 'status_check') {
             const uptimeSecs = Math.floor((Date.now() - startTime) / 1000);
@@ -276,9 +283,14 @@ function startCommandWatcher() {
   subscribe();
 }
 
-client.on('disconnect', async () => {
-  console.warn('[Pitboss] Bot disconnected.');
-  await writeLog('connection', 'Bot disconnected from Discord.', {});
+client.on('shardDisconnect', async (event, shardId) => {
+  console.warn(`[Pitboss] Shard ${shardId} disconnected.`);
+  await writeLog('connection', `Bot disconnected from Discord (shard ${shardId}).`, {});
+});
+
+client.on('shardResume', async (shardId, replayedEvents) => {
+  console.log(`[Pitboss] Shard ${shardId} resumed (${replayedEvents} events replayed).`);
+  await writeLog('connection', `Bot reconnected to Discord (shard ${shardId}).`, {});
 });
 
 client.on('error', async (err) => {
@@ -304,7 +316,7 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     const settingsSnap = await db.collection('settings').doc('config').get();
     const settings = settingsSnap.exists ? settingsSnap.data() : {};
-    const orKey = settings.openrouterKey;
+    const orKey = process.env.OPENROUTER_KEY || settings.openrouterKey;
     const orModel = settings.openrouterModel || 'google/gemini-2.0-flash-lite-001';
     const personality = settings.pitbossPersonality || DEFAULT_PERSONALITY;
 
@@ -348,7 +360,7 @@ client.on(Events.MessageCreate, async (message) => {
     // Hard cap at 300 chars for Discord safety
     if (reply.length > 300) reply = reply.slice(0, 297) + '...';
 
-    await message.reply(reply);
+    await message.reply({ content: reply, allowedMentions: { parse: [], repliedUser: true } });
     await writeLog('reply', `@${message.author.username} → "${reply.slice(0, 120)}"`, { user: message.author.username, channel: message.channel.name });
   } catch (e) {
     console.error('[Pitboss] Mention reply error:', e.message);
@@ -386,8 +398,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         allowed = member.permissions.has(PermissionsBitField.Flags.Administrator) ||
                   member.permissions.has(PermissionsBitField.Flags.ManageGuild);
       }
-      // Otherwise allow anyone (button is in #clanker, an admin-only channel by convention)
-      if (!allowed) allowed = true;
     }
     if (!allowed) {
       await interaction.reply({ content: 'You ain\'t cleared to approve this.', ephemeral: true });

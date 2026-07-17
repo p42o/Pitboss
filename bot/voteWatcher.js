@@ -200,7 +200,15 @@ async function processWorkflow(ctx, wf) {
   const wfRef = db.collection('vote_workflows').doc(wf.id);
 
   // --- resume mid-generation after a crash ---
-  if (wf.status === 'generating') return generateAndPostApproval(ctx, wf);
+  // A generation stamps generationStartedAt when it actually begins. If that
+  // stamp is recent (<5min), a generation is still in flight (they take 30-90s)
+  // — do NOT launch a second one on this 60s tick. Only resume if it's stale
+  // (older than 5min → the previous run crashed) or never stamped.
+  if (wf.status === 'generating') {
+    const startedAt = wf.generationStartedAt?.toDate ? wf.generationStartedAt.toDate() : null;
+    if (startedAt && (Date.now() - startedAt.getTime()) < 5 * 60 * 1000) return;
+    return generateAndPostApproval(ctx, wf);
+  }
 
   // --- tie_pending: nothing to do; host tap or the tie_safety_net job resolves it ---
   if (wf.status === 'tie_pending') return;
@@ -249,7 +257,7 @@ async function processWorkflow(ctx, wf) {
         // legacy display mirrors so existing card/AI code keeps working
         winningLabel: winner.label, winningWeekday: winner.weekday,
         computedFirstHandUtc: Timestamp.fromDate(winner.startAtUtc),
-        tieResolvedBy: 'votes',
+        tieResolvedBy: 'votes', generationStartedAt: FieldValue.serverTimestamp(),
       });
       await ctx.writeLog('vote_closed', `Vote ${wf.id.slice(0, 6)} closed. Winner: ${winner.label} (${res.maxVotes} votes).`, { workflowId: wf.id });
       return generateAndPostApproval(ctx, { ...wf, status: 'generating', winningLabel: winner.label, winningWeekday: winner.weekday, computedFirstHandUtc: { toDate: () => winner.startAtUtc } });
@@ -282,6 +290,7 @@ async function handleTie(ctx, wf, optionsForWrite, engOptions, res) {
       winningLabel: winner.label, winningWeekday: winner.weekday,
       computedFirstHandUtc: Timestamp.fromDate(winner.startAtUtc),
       tieResolvedBy: 'runoff_auto_earliest', tieResolvedAt: FieldValue.serverTimestamp(),
+      generationStartedAt: FieldValue.serverTimestamp(),
     });
     await ctx.writeLog('vote_closed', `Runoff for ${wf.id.slice(0, 6)} ${res.isEmpty ? 'got no votes' : 'tied again'}; auto-picked earliest: ${winner.label}.`, { workflowId: wf.id });
     return generateAndPostApproval(ctx, {
@@ -371,7 +380,7 @@ async function processLegacyV1(ctx, wf, counts) {
   }
   const year = wf.year || new Date().getFullYear();
   const firstHandUtc = computeFirstHandUtc(year, parsed.month, parsed.day, wf.gameTime || '7:30 PM CT');
-  await wfRef.update({ status: 'generating', winningWeekday: parsed.weekday, winningLabel: winners[0], computedFirstHandUtc: Timestamp.fromDate(firstHandUtc) });
+  await wfRef.update({ status: 'generating', winningWeekday: parsed.weekday, winningLabel: winners[0], computedFirstHandUtc: Timestamp.fromDate(firstHandUtc), generationStartedAt: FieldValue.serverTimestamp() });
   await ctx.writeLog('vote_closed', `Legacy vote ${wf.id.slice(0, 6)} closed. Winner: ${winners[0]}.`, { workflowId: wf.id });
   return generateAndPostApproval(ctx, { ...wf, status: 'generating', winningWeekday: parsed.weekday, computedFirstHandUtc: { toDate: () => firstHandUtc } });
 }
@@ -379,6 +388,10 @@ async function processLegacyV1(ctx, wf, counts) {
 async function generateAndPostApproval(ctx, wf) {
   const { db } = ctx;
   const wfRef = db.collection('vote_workflows').doc(wf.id);
+  // Stamp the true start of generation so the 60s watcher tick won't launch a
+  // second generation while this one (30-90s) is still running. Covers the
+  // host-pick path (index.js pn-pick sets 'generating' without inline gen).
+  await wfRef.update({ generationStartedAt: FieldValue.serverTimestamp() }).catch(() => {});
   const settingsSnap = await db.collection('settings').doc('config').get();
   const settings = settingsSnap.exists ? settingsSnap.data() : {};
   ctx.settings = settings;
@@ -392,16 +405,17 @@ async function generateAndPostApproval(ctx, wf) {
   let imageBuffer = null;
 
   try {
-    announcementText = await generateAnnouncementText(settings.openrouterKey, settings.openrouterModel, firstHandDate, gameTime);
+    announcementText = await generateAnnouncementText(process.env.OPENROUTER_KEY || settings.openrouterKey, settings.openrouterModel, firstHandDate, gameTime);
   } catch (e) {
     await surfaceFailure(ctx, { workflowId: wf.id, scope: 'ai_text', level: 'warning', message: `Announcement text gen failed (${e.message}); using fallback template.` });
     const f = (o) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', ...o }).format(firstHandDate);
     announcementText = `🃏   ${f({ month: 'long' })} ${f({ year: 'numeric' })} Round Poker Night  ♠️\n\n🗓️ Date: ${f({ weekday: 'long' })}, ${f({ month: 'numeric', day: 'numeric', year: 'numeric' })}\n⏰ Time: ${gameTime}\n🎮 Platform: PokerNow\n💰 Buy-in: $20 min\n🤑  Blinds: 10/20\n\n@everyone\n\n👇🏼  ✅  or ❌  below 👇🏼`;
   }
 
-  if (settings.openaiKey && settings.brandLogoUrl) {
+  const openaiKey = process.env.OPENAI_KEY || settings.openaiKey;
+  if (openaiKey && settings.brandLogoUrl) {
     try {
-      imageBuffer = await generateAnnouncementImage(settings.openaiKey, settings.brandLogoUrl, buildImagePrompt(firstHandDate));
+      imageBuffer = await generateAnnouncementImage(openaiKey, settings.brandLogoUrl, buildImagePrompt(firstHandDate));
       await ctx.writeLog('image_generated', `Announcement image generated for ${wf.id.slice(0, 6)}.`, { workflowId: wf.id });
       if (settings.imgurClientId) {
         try { imageUrl = await uploadToImgur(settings.imgurClientId, imageBuffer); await ctx.writeLog('imgur_uploaded', `Image uploaded: ${imageUrl}`, { workflowId: wf.id }); }

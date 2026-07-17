@@ -2,40 +2,66 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Only authenticated users can read/write all data
-    // The bot uses a service account which bypasses these rules
+    // The bot uses a service account which BYPASSES these rules entirely.
+    // These rules only gate the web clients (Command Center = p42o@me.com,
+    // The Lab dashboard = parks.phone@gmail.com). Scoped to the specific admin
+    // emails — NOT "any authenticated user" — because settings/config holds
+    // live API keys and the collections drive the Discord bot. Open sign-up on
+    // this project is disabled, but email-scoping is the real control.
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email in ['p42o@me.com', 'parks.phone@gmail.com'];
+    }
 
     match /settings/{document} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAdmin();
     }
 
     match /scheduled_jobs/{document} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAdmin();
     }
 
     match /logs/{document} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+      allow read: if isAdmin();
+      allow write: if isAdmin();
       // Allow delete for log clearing
-      allow delete: if request.auth != null;
+      allow delete: if isAdmin();
     }
 
     match /bot_commands/{document} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAdmin();
     }
 
     match /bot_status/{document} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+      allow read: if isAdmin();
+      allow write: if isAdmin();
     }
 
     match /vote_workflows/{document} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAdmin();
     }
 
     // Sports contests (fantasy football, Super Bowl props, NCAA bracket) — admin-managed
     match /contests/{document} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAdmin();
+    }
+
+    // THE LAB command bus (mnclockworks.com/lab) — Parker ONLY, stricter than
+    // the poker collections above. The lab-bridge daemon on the VPS uses the
+    // service account (bypasses rules) to execute commands + write results.
+    match /lab_commands/{document} {
+      allow read, create, update: if request.auth != null
+        && request.auth.token.email == 'parks.phone@gmail.com';
+      allow delete: if false;
+    }
+
+    // Inbound customer email (sales@mnclockworks.com). The Vercel receiver +
+    // lab-bridge write here via the service account (bypasses rules); the /lab
+    // dashboard only READS to show drafts. Parker only.
+    match /inbound_emails/{document} {
+      allow read: if request.auth != null
+        && request.auth.token.email == 'parks.phone@gmail.com';
+      allow write: if false;
     }
 
     // Deny all other access by default

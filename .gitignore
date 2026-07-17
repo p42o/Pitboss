@@ -2,7 +2,12 @@ node_modules/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 serviceAccountKey.json
+serviceAccount.json
+serviceAccount*.json
+*serviceAccount*.json
 *.command
 .DS_Store
 .firebase/
